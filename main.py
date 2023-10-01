@@ -42,17 +42,60 @@ class MainWindow(QMainWindow):
         self.main_layout = QVBoxLayout()
         self._init_launcher()
 
-    def _init_guiding(self, camera_index):
+    def _init_guiding(self, camera_index, camera_ip):
         self.camera_index = camera_index
+        self.camera_ip = camera_ip
+
         logger.debug("Closing myself...")
+        self.main_layout.removeWidget(self.main_widget)
+        self.main_widget.setParent(None)
+        self.main_widget = None
         self.close()
         logger.debug("...closed")
 
         self.setWindowTitle("Guiding")
         self.setGeometry(100, 100, 320, 200)
-        widget = QWidget()
-        self.setCentralWidget(widget)
+        self.main_widget = QWidget(self)
+        guiding_layout = QVBoxLayout()
+        logger.debug("Adding new widgets...")
+        self.demo_button = QPushButton("Demo", self)
+        self.demo_button.clicked.connect(self._camera_demo)
+        guiding_layout.addWidget(self.demo_button)
+        self.main_widget.setLayout(guiding_layout)
+        logger.debug("Setting central widget")
+        self.setCentralWidget(self.main_widget)
         self.show()
+
+    def _get_request(self, try_ip, full_url):
+        try:
+            response = requests.get(full_url, timeout=5)
+        except requests.exceptions.Timeout:
+            logger.debug(f"Connection to {try_ip} timed out!")
+            self._error_prompt(f"Connection to {try_ip} timed out!")
+            return None
+
+        except Exception as e:
+            logger.debug(f"Unknown exception: {e}")
+            self._error_prompt(f"Unknown exception when connecting to {try_ip}: {e}")
+            return None
+
+        if response.status_code != 200:
+            logger.debug(f"HTTP error encountered while getting from {try_ip}: "
+                         f"status code={response.status_code}")
+            self._error_prompt(f"HTTP error encountered while getting from {try_ip}:\n"
+                               f"status code={response.status_code}")
+            return None
+        return response
+
+    def _camera_demo(self):
+        url = f"http://{self.camera_ip}:{port_for_cameras}/camera/{self.camera_index}/demo"
+        logger.debug(f"Trying to demo camera on {url}")
+        response = self._get_request(self.camera_ip, url)
+        if response is None:
+            return
+        logger.debug(f"Got 200 OK from {url}")
+        if response.headers.get('content-type') == 'application/json':
+            logger.debug(f"Response content = {response.json()}")
 
     def _init_launcher(self):
         self.setWindowTitle("Guiding Launcher")
@@ -104,9 +147,9 @@ class MainWindow(QMainWindow):
 
         self.main_layout.addLayout(layout5)
 
-        widget = QWidget()
-        widget.setLayout(self.main_layout)
-        self.setCentralWidget(widget)
+        self.main_widget = QWidget(self)
+        self.main_widget.setLayout(self.main_layout)
+        self.setCentralWidget(self.main_widget)
         self.show()
 
     def _read_preset_ips(self):
@@ -189,7 +232,7 @@ class MainWindow(QMainWindow):
             return
         logger.debug(f"Acquired 200 OK and response: {response.json()}, camera {camera_name} initialized.")
 
-        self._init_guiding(camera_index)
+        self._init_guiding(camera_index, current_ip)
 
     def _load_ip_from_preset(self, t):
         new_ip = self.preset_ip_items[t]
