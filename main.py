@@ -1,4 +1,5 @@
-from PyQt5.QtWidgets import QInputDialog, QErrorMessage, QLabel, QLineEdit, QHBoxLayout, QMainWindow, QApplication, QWidget, QVBoxLayout, QPushButton, QComboBox
+from PyQt5.QtWidgets import QInputDialog, QErrorMessage, QLabel, QLineEdit, QHBoxLayout, QMainWindow, QApplication, \
+    QWidget, QVBoxLayout, QPushButton, QComboBox
 import sys
 import json
 import os
@@ -19,40 +20,60 @@ def read_json_file_content(fp):
         return json.load(infile)
 
 
+def read_config():
+    return read_json_file_content(config_file_path)
+
+
+def save_config(c):
+    with open(config_file_path, 'w') as outfile:
+        json.dump(c, outfile)
+
+
 def write_empty_config_to_file(fp):
     with open(fp, 'w') as outfile:
-        json.dump({
-            "saved_ips": {}
-        }, outfile)
-
-
-def read_preset_ip_from_config():
-    config = read_json_file_content(config_file_path)
-    return config["saved_ips"]
+        json.dump({}, outfile)
 
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super(MainWindow, self).__init__()
 
+        self.config = read_config()
+        self.main_layout = QVBoxLayout()
+        self._init_launcher()
+
+    def _init_guiding(self, camera_index):
+        self.camera_index = camera_index
+        logger.debug("Closing myself...")
+        self.close()
+        logger.debug("...closed")
+
         self.setWindowTitle("Guiding")
+        self.setGeometry(100, 100, 320, 200)
+        widget = QWidget()
+        self.setCentralWidget(widget)
+        self.show()
+
+    def _init_launcher(self):
+        self.setWindowTitle("Guiding Launcher")
         self.setGeometry(100, 100, 320, 100)
 
-        layout1 = QVBoxLayout()
         layout2 = QHBoxLayout()
         layout3 = QHBoxLayout()
         layout4 = QHBoxLayout()
         layout5 = QHBoxLayout()
 
         self.preset_ip_combo = QComboBox()
-        self.preset_ip_items = read_preset_ip_from_config()
+        self.preset_ip_items = self._read_preset_ips()
         self.preset_ip_combo.addItems(self.preset_ip_items.keys())
         self.preset_ip_combo.currentTextChanged.connect(self._load_ip_from_preset)
 
         layout2.addWidget(QLabel('Enter IP:', self))
 
-        self.ip_edit = QLineEdit(self, placeholderText='enter ip here...')
-        self.ip_edit.setInputMask( "000.000.000.000")
+        placeholder_text = self._get_ip_initial_text()
+        self.ip_edit = QLineEdit(self)
+        self.ip_edit.setInputMask("000.000.000.000")
+        self.ip_edit.setText(placeholder_text)
 
         layout2.addWidget(self.ip_edit)
 
@@ -60,32 +81,44 @@ class MainWindow(QMainWindow):
         self.save_ip_button.clicked.connect(self._save_preset_ip_in_config)
         layout2.addWidget(self.save_ip_button)
 
-        layout1.addLayout(layout2)
+        self.main_layout.addLayout(layout2)
 
         layout3.addWidget(QLabel('Or choose saved:', self))
         layout3.addWidget(self.preset_ip_combo)
 
-        layout1.addLayout(layout3)
+        self.main_layout.addLayout(layout3)
 
         self.camera_chooser_combo = QComboBox()
 
         self.connect_ip_button = QPushButton("Get cameras list", self)
         self.connect_ip_button.clicked.connect(self._get_cameras_list)
         layout4.addWidget(self.connect_ip_button)
-        layout1.addLayout(layout4)
+        self.main_layout.addLayout(layout4)
 
-        self.connect_camera_button = QPushButton("OK", self)
+        self.connect_camera_button = QPushButton("Go!", self)
+        self.connect_camera_button.setEnabled(False)
         self.connect_camera_button.clicked.connect(self._connect_to_camera)
         layout5.addWidget(QLabel("Choose camera:", self))
         layout5.addWidget(self.camera_chooser_combo)
         layout5.addWidget(self.connect_camera_button)
 
-        layout1.addLayout(layout5)
+        self.main_layout.addLayout(layout5)
 
         widget = QWidget()
-        widget.setLayout(layout1)
+        widget.setLayout(self.main_layout)
         self.setCentralWidget(widget)
         self.show()
+
+    def _read_preset_ips(self):
+        d = {"": ""}
+        d.update(self.config.get("saved_ips", {}))
+        logger.debug(f"Read preset ids = {d}")
+        return d
+
+    def _get_ip_initial_text(self):
+        last_used_ip = self.config.get("last_used_ip", "")
+        logger.debug(f"Obtained last used ip from config: {last_used_ip}")
+        return last_used_ip
 
     def _error_prompt(self, t):
         error_dialog = QErrorMessage(self)
@@ -100,24 +133,63 @@ class MainWindow(QMainWindow):
         except requests.exceptions.Timeout:
             logger.debug(f"Connection to {try_ip} timed out!")
             self._error_prompt(f"Connection to {try_ip} timed out!")
-            return []
+            return
 
         except Exception as e:
             logger.debug(f"Unknown exception: {e}")
             self._error_prompt(f"Unknown exception when connecting to {try_ip}: {e}")
-            return []
+            return
 
         if response.status_code != 200:
-            logger.debug(f"Could not obtain cameras from {try_ip}: status code={response.status_code}")
-            self._error_prompt(f"Could not obtain cameras from {try_ip}:\n status code={response.status_code}")
-            return []
-        else:
-            cameras_list = response.json()["cameras"]
-            logger.debug(f"Successfully got list of cameras at {try_ip} : {cameras_list}")
-            return cameras_list
+            logger.debug(f"Could not obtain cameras from {try_ip}: "
+                         f"status code={response.status_code}")
+            self._error_prompt(f"Could not obtain cameras from {try_ip}:\n"
+                               f"status code={response.status_code}")
+            return
+
+        self._save_to_config({"last_used_ip": try_ip})
+        cameras_list = response.json()["cameras"]
+        logger.debug(f"Successfully got list of cameras at {try_ip} : {cameras_list}")
+        self.camera_chooser_combo.clear()
+        self.camera_chooser_combo.addItems(cameras_list)
+        self.connect_camera_button.setEnabled(len(cameras_list) > 0)
+
+    def _save_config(self):
+        save_config(self.config)
+
+    def _save_to_config(self, d: dict):
+        self.config.update(d)
+        self._save_config()
 
     def _connect_to_camera(self):
-        logger.debug(f"Connecting to camera {self.camera_chooser_combo.currentText()} at {self.ip_edit.text()}")
+        camera_name = self.camera_chooser_combo.currentText()
+        camera_index = self.camera_chooser_combo.currentIndex()
+        current_ip = self.ip_edit.text()
+
+        logger.debug(f"Connecting to camera {camera_name} at {current_ip}")
+        init_camera_url = f"http://{current_ip}:{port_for_cameras}/init_camera"
+        headers = {"Content-Type": "application/json; charset=utf-8"}
+        data = {"name": camera_name}
+        try:
+            response = requests.post(init_camera_url, headers=headers, json=data, timeout=5)
+        except requests.exceptions.Timeout:
+            logger.debug(f"Connection to {init_camera_url} timed out!")
+            self._error_prompt(f"Connection to {init_camera_url} timed out!")
+            return
+
+        except Exception as e:
+            logger.debug(f"Unknown exception: {e}")
+            self._error_prompt(f"Unknown exception when connecting to {init_camera_url}: {e}")
+            return
+        if response.status_code != 200:
+            logger.debug(f"Could not initialize camera {camera_name} under {current_ip}: "
+                         f"status code = {response.status_code}")
+            self._error_prompt(f"Could not initialize camera {camera_name} under {current_ip}:\n"
+                               f"status code={response.status_code}")
+            return
+        logger.debug(f"Acquired 200 OK and response: {response.json()}, camera {camera_name} initialized.")
+
+        self._init_guiding(camera_index)
 
     def _load_ip_from_preset(self, t):
         new_ip = self.preset_ip_items[t]
@@ -127,11 +199,9 @@ class MainWindow(QMainWindow):
     def _save_preset_ip_in_config(self):
         ip_alias, dialog_ok = QInputDialog.getText(self, 'Save IP', 'Save current ip as:')
         if dialog_ok:
-            config = read_json_file_content(config_file_path)
-            config["saved_ips"][ip_alias] = self.ip_edit.text()
-
-            with open(config_file_path, 'w') as outfile:
-                json.dump(config, outfile)
+            new_config_entry = {"saved_ips": {ip_alias: self.ip_edit.text()}}
+            logger.debug(f"Saving new config entry: {new_config_entry}")
+            self._save_to_config(new_config_entry)
 
 
 def configure_logging(logfile_path):
