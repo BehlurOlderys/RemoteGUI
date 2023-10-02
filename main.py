@@ -1,11 +1,16 @@
 from PyQt5.QtWidgets import QInputDialog, QErrorMessage, QLabel, QLineEdit, QHBoxLayout, QMainWindow, QApplication, \
     QWidget, QVBoxLayout, QPushButton, QComboBox
+from PIL import ImageQt, Image
+from PyQt5.QtGui import QPixmap, QImage
 import sys
 import json
 import os
 import logging
 from logging.handlers import RotatingFileHandler
 import requests
+import io
+import time
+import numpy as np
 
 
 logger = logging.getLogger(__name__)
@@ -58,9 +63,14 @@ class MainWindow(QMainWindow):
         self.main_widget = QWidget(self)
         guiding_layout = QVBoxLayout()
         logger.debug("Adding new widgets...")
-        self.demo_button = QPushButton("Demo", self)
-        self.demo_button.clicked.connect(self._camera_demo)
-        guiding_layout.addWidget(self.demo_button)
+        self.get_last_image_button = QPushButton("Get last image", self)
+        self.get_last_image_button.clicked.connect(self._get_last_image)
+        guiding_layout.addWidget(self.get_last_image_button)
+
+        self.image_label = QLabel(self)
+        self.image_label.setText("whatever")
+        guiding_layout.addWidget(self.image_label)
+
         self.main_widget.setLayout(guiding_layout)
         logger.debug("Setting central widget")
         self.setCentralWidget(self.main_widget)
@@ -86,6 +96,49 @@ class MainWindow(QMainWindow):
                                f"status code={response.status_code}")
             return None
         return response
+
+    def _get_last_image(self):
+        start_time = time.time()
+        url = f"http://{self.camera_ip}:{port_for_cameras}/camera/{self.camera_index}/get_last_image"
+        logger.debug(f"Trying to get last image from camera on {url}")
+        response = self._get_request(self.camera_ip, url)
+        start_time = time.time()
+        logger.debug("Acquired response!")
+        if response is None:
+            return
+
+        print(response.content[:1024])
+
+        # with open('logo.png', 'rb') as f:
+        #     content = f.read()
+        #
+        # print(content[:1024])
+        #
+        # self.qImg = QImage()
+        # self.qImg.loadFromData(content)
+        #
+        # # self.qImg = QImage(response.content, 1608, 1104, 1, QImage.Format_Grayscale8)
+        img = np.frombuffer(response.content, dtype=np.uint8)
+
+
+
+        a = np.percentile(img, 5)
+        b = np.percentile(img, 95)
+        normalized = (img - a) / (b - a)
+        final_img = np.clip(256 * normalized, 0, 255).astype(np.uint8)
+
+
+
+
+        logger.debug(f"Max = {np.max(final_img)}, min = {np.min(final_img)}")
+        final_img = final_img.reshape(1608, 1104)
+
+        qImg = QImage(final_img.data, final_img.shape[0], final_img.shape[1], QImage.Format_Grayscale8)
+        qp = QPixmap(qImg)
+        self.image_label.setPixmap(qp)
+        time_elapsed = time.time() - start_time
+        logger.debug(f"Time elapsed: {time_elapsed}")
+
 
     def _camera_demo(self):
         url = f"http://{self.camera_ip}:{port_for_cameras}/camera/{self.camera_index}/demo"
