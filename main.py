@@ -1,7 +1,9 @@
-from PyQt5.QtWidgets import QInputDialog, QErrorMessage, QLabel, QLineEdit, QHBoxLayout, QMainWindow, QApplication, \
-    QWidget, QVBoxLayout, QPushButton, QComboBox
+from PyQt5.QtWidgets import QInputDialog, QErrorMessage, QLabel, QLineEdit, QGridLayout, QHBoxLayout, QMainWindow, QApplication, \
+    QWidget, QVBoxLayout, QPushButton, QComboBox, QRadioButton
 from PIL import ImageQt, Image
-from PyQt5.QtGui import QPixmap, QImage
+from skimage.transform import rescale
+from PyQt5.QtGui import QPixmap, QImage, QIcon
+from PyQt5.QtCore import Qt
 import sys
 import json
 import os
@@ -39,17 +41,106 @@ def write_empty_config_to_file(fp):
         json.dump({}, outfile)
 
 
+def normalize_image(img):
+    a = np.percentile(img, 5)
+    b = np.percentile(img, 95)
+    normalized = (img - a) / (b - a)
+    return np.clip(256 * normalized, 0, 255).astype(np.uint8)
+
+
+class ResizeableLabelWithImage(QLabel):
+    def __init__(self, parent):
+        QLabel.__init__(self, parent)
+        self.setText("<IMAGE>")
+        self._original_image = None
+
+    def set_image(self, img: QImage):
+        self._original_image = QPixmap(img)
+        width = self.frameGeometry().width()
+        height = self.frameGeometry().height()
+        logger.debug(f"Label size is currently: {width}x{height} px")
+        qp = self._original_image.scaled(width, height, Qt.KeepAspectRatio)
+        self.setPixmap(qp)
+        self.setMinimumSize(1, 1)
+
+    def resizeEvent(self, event):
+        if self._original_image is not None:
+            pixmap = self._original_image.scaled(self.width(), self.height())
+            self.setPixmap(pixmap)
+        self.resize(self.width(), self.height())
+
+
+def add_binning_radio_button(parent, requester, layout, on_clicked, default_bin):
+    possible_bins = requester.get_possible_binning()
+    for index, bin in enumerate(possible_bins):
+        logger.debug(f"Found binning: x{bin}")
+        radiobutton = QRadioButton(f"bin x{bin}", parent)
+        radiobutton.toggled.connect(on_clicked)
+        if bin == default_bin:
+            logger.debug(f"Setting default binning={default_bin}")
+            radiobutton.setChecked(True)
+        layout.addWidget(radiobutton, 0, index)
+        
+
+class CameraRequester:
+    def __init__(self, ip, camera_index, error_prompt):
+        self._ip = ip
+        self._camera_index = camera_index
+        self._error_prompt = error_prompt
+
+    def _get_request(self, full_url):
+        logger.debug(f"Trying to reach {full_url}...")
+        try:
+            response = requests.get(full_url, timeout=5)
+        except requests.exceptions.Timeout:
+            logger.debug(f"Connection to {self._ip} timed out!")
+            self._error_prompt(f"Connection to {self._ip} timed out!")
+            return None
+
+        except Exception as e:
+            logger.debug(f"Unknown exception: {e}")
+            self._error_prompt(f"Unknown exception when connecting to {self._ip}: {e}")
+            return None
+
+        logger.debug(f"Acquired response from {full_url}")
+        if response.status_code != 200:
+            logger.warning(f"HTTP error encountered while getting from {self._ip}: "
+                         f"status code={response.status_code}")
+            self._error_prompt(f"HTTP error encountered while getting from {self._ip}:\n"
+                               f"status code={response.status_code}")
+            return None
+        return response
+
+    def get_possible_binning(self):
+        url = f"http://{self._ip}:{port_for_cameras}/camera/{self._camera_index}/get_maxbinx"
+        logger.debug(f"url = {url}")
+        response = self._get_request(url)
+        if response is None:
+            return []
+        maxbinx = int(response.json()["value"])
+        logger.debug(f"Max possible bin is {maxbinx}")
+        return list(range(1, maxbinx+1))
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super(MainWindow, self).__init__()
-
+        self.setWindowIcon(QIcon('logo.png'))
         self.config = read_config()
         self.main_layout = QVBoxLayout()
         self._init_launcher()
+        self.requester = None
 
-    def _init_guiding(self, camera_index, camera_ip):
+    def on_bin_radio_clicked(self):
+        radio_button = self.sender()
+        if radio_button.isChecked():
+            logger.debug(f"Chosen binning: {radio_button.text()}")
+
+    def _init_guiding(self, camera_index, camera_name, camera_ip):
         self.camera_index = camera_index
+        self.camera_name = camera_name
         self.camera_ip = camera_ip
+        self.requester = CameraRequester(self.camera_ip, self.camera_index, self._error_prompt)
 
         logger.debug("Closing myself...")
         self.main_layout.removeWidget(self.main_widget)
@@ -61,15 +152,20 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Guiding")
         self.setGeometry(100, 100, 320, 200)
         self.main_widget = QWidget(self)
+        radio_layout = QGridLayout()
+        default_bin = self._read_default_bin(self.camera_name)
+        add_binning_radio_button(self, self.requester, radio_layout, self.on_bin_radio_clicked, default_bin)
+
         guiding_layout = QVBoxLayout()
+        guiding_layout.addLayout(radio_layout)
         logger.debug("Adding new widgets...")
         self.get_last_image_button = QPushButton("Get last image", self)
         self.get_last_image_button.clicked.connect(self._get_last_image)
         guiding_layout.addWidget(self.get_last_image_button)
 
-        self.image_label = QLabel(self)
-        self.image_label.setText("whatever")
+        self.image_label = ResizeableLabelWithImage(self)
         guiding_layout.addWidget(self.image_label)
+
 
         self.main_widget.setLayout(guiding_layout)
         logger.debug("Setting central widget")
@@ -97,48 +193,50 @@ class MainWindow(QMainWindow):
             return None
         return response
 
+    def _get_resolution(self):
+        logger.debug(f"Trying to get camera resolution...")
+
+        logger.debug(f"X...")
+        url = f"http://{self.camera_ip}:{port_for_cameras}/camera/{self.camera_index}/get_numx"
+        response = self._get_request(self.camera_ip, url)
+        if response is None:
+            return False, None
+        xres = int(response.json()["value"])
+        url = f"http://{self.camera_ip}:{port_for_cameras}/camera/{self.camera_index}/get_numy"
+        response = self._get_request(self.camera_ip, url)
+        if response is None:
+            return False, None
+        yres = int(response.json()["value"])
+        logger.debug(f"Resolution = {xres}x{yres}")
+        return True, (xres, yres)
+
     def _get_last_image(self):
+        is_ok, (w, h) = self._get_resolution()
         start_time = time.time()
         url = f"http://{self.camera_ip}:{port_for_cameras}/camera/{self.camera_index}/get_last_image"
         logger.debug(f"Trying to get last image from camera on {url}")
         response = self._get_request(self.camera_ip, url)
+        time_elapsed = time.time() - start_time
+        logger.debug(f"Time elapsed on receiving response: {time_elapsed}")
         start_time = time.time()
         logger.debug("Acquired response!")
         if response is None:
             return
 
-        print(response.content[:1024])
+        logger.debug(response.content[:1024])
 
-        # with open('logo.png', 'rb') as f:
-        #     content = f.read()
-        #
-        # print(content[:1024])
-        #
-        # self.qImg = QImage()
-        # self.qImg.loadFromData(content)
-        #
-        # # self.qImg = QImage(response.content, 1608, 1104, 1, QImage.Format_Grayscale8)
         img = np.frombuffer(response.content, dtype=np.uint8)
-
-
-
-        a = np.percentile(img, 5)
-        b = np.percentile(img, 95)
-        normalized = (img - a) / (b - a)
-        final_img = np.clip(256 * normalized, 0, 255).astype(np.uint8)
-
-
-
-
-        logger.debug(f"Max = {np.max(final_img)}, min = {np.min(final_img)}")
-        final_img = final_img.reshape(1608, 1104)
+        logger.debug("Reshaping...")
+        original_img = img.reshape(2072, 1410)
+        logger.debug(f"dimension = {original_img.shape}, Max = {np.max(original_img)}, min = {np.min(original_img)}")
+        final_img = normalize_image(original_img)
 
         qImg = QImage(final_img.data, final_img.shape[0], final_img.shape[1], QImage.Format_Grayscale8)
-        qp = QPixmap(qImg)
-        self.image_label.setPixmap(qp)
-        time_elapsed = time.time() - start_time
-        logger.debug(f"Time elapsed: {time_elapsed}")
+        self.image_label.set_image(qImg)
 
+        # self.image_label.setScaledContents(True)
+        time_elapsed = time.time() - start_time
+        logger.debug(f"Time elapsed on processing: {time_elapsed}")
 
     def _camera_demo(self):
         url = f"http://{self.camera_ip}:{port_for_cameras}/camera/{self.camera_index}/demo"
@@ -204,6 +302,18 @@ class MainWindow(QMainWindow):
         self.main_widget.setLayout(self.main_layout)
         self.setCentralWidget(self.main_widget)
         self.show()
+
+    def _read_default_bin(self, camera_name):
+        defaults = self.config.get("camera_defaults", {})
+        if not defaults:
+            logger.warning(f"There are no camera defaults in config")
+            return 1
+        camera_config = defaults.get(camera_name, "")
+        if not camera_config:
+            logger.warning(f"Could not find defaults for {camera_name}")
+            return 1
+        default_bin = camera_config.get("default_bin", 1)
+        return int(default_bin)
 
     def _read_preset_ips(self):
         d = {"": ""}
@@ -285,7 +395,7 @@ class MainWindow(QMainWindow):
             return
         logger.debug(f"Acquired 200 OK and response: {response.json()}, camera {camera_name} initialized.")
 
-        self._init_guiding(camera_index, current_ip)
+        self._init_guiding(camera_index, camera_name, current_ip)
 
     def _load_ip_from_preset(self, t):
         new_ip = self.preset_ip_items[t]
