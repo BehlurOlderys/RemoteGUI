@@ -80,7 +80,53 @@ def add_binning_radio_button(parent, requester, layout, on_clicked, default_bin)
             logger.debug(f"Setting default binning={default_bin}")
             radiobutton.setChecked(True)
         layout.addWidget(radiobutton, 0, index)
-        
+
+
+def null_handler(s):
+    pass
+
+
+def handle_request_call(request_call, full_url, error_prompt):
+    logger.debug(f"Trying to reach {full_url}...")
+    try:
+        response = request_call()
+    except requests.exceptions.Timeout:
+        logger.error(f"Connection to {full_url} timed out!")
+        error_prompt(f"Connection to {full_url} timed out!")
+        return None
+
+    except Exception as e:
+        logger.error(f"Unknown exception: {e}")
+        error_prompt(f"Unknown exception when connecting to {full_url}: {e}")
+        return None
+
+    logger.debug(f"Acquired response from {full_url}")
+    if response.status_code != 200:
+        if response.status_code == 422:
+            print(response.content)
+        logger.error(f"HTTP error encountered while getting from {full_url}: "
+                     f"status code={response.status_code}")
+        error_prompt(f"HTTP error encountered while getting from {full_url}:\n"
+                     f"status code={response.status_code}")
+        return None
+    return response
+
+
+def standalone_get_request(url, error_prompt=null_handler):
+    def request_call():
+        return requests.get(url, timeout=5)
+
+    return handle_request_call(request_call, url, error_prompt)
+
+
+def standalone_post_request(url, headers, data, error_prompt=null_handler):
+    logger.debug(f"Trying to POST on {url}")
+
+    def request_call():
+        return requests.post(url, headers=headers, json=data, timeout=5)
+
+    return handle_request_call(request_call, url, error_prompt)
+
 
 class CameraRequester:
     def __init__(self, ip, camera_index, error_prompt):
@@ -89,32 +135,42 @@ class CameraRequester:
         self._error_prompt = error_prompt
 
     def _get_request(self, full_url):
-        logger.debug(f"Trying to reach {full_url}...")
-        try:
-            response = requests.get(full_url, timeout=5)
-        except requests.exceptions.Timeout:
-            logger.debug(f"Connection to {self._ip} timed out!")
-            self._error_prompt(f"Connection to {self._ip} timed out!")
-            return None
+        return standalone_get_request(full_url, self._error_prompt)
 
-        except Exception as e:
-            logger.debug(f"Unknown exception: {e}")
-            self._error_prompt(f"Unknown exception when connecting to {self._ip}: {e}")
-            return None
+    def _regular_get_url(self, what_to_get):
+        url = f"http://{self._ip}:{port_for_cameras}/camera/{self._camera_index}/{what_to_get}"
+        logger.debug(f"Using URL for next request: {url}")
+        return self._get_request(url)
 
-        logger.debug(f"Acquired response from {full_url}")
-        if response.status_code != 200:
-            logger.warning(f"HTTP error encountered while getting from {self._ip}: "
-                         f"status code={response.status_code}")
-            self._error_prompt(f"HTTP error encountered while getting from {self._ip}:\n"
-                               f"status code={response.status_code}")
-            return None
-        return response
+    def custom_request(self, url):
+        return self._get_request(url)
+
+    def set_binning(self, value):
+        url = f"http://{self._ip}:{port_for_cameras}/camera/{self._camera_index}/set_binx"
+        headers = {"Content-Type": "application/json; charset=utf-8"}
+        data = {"value": str(value)}
+        return standalone_post_request(url, headers, data, self._error_prompt)
+
+    def get_last_image(self):
+        return self._regular_get_url("get_last_image")
+
+    def get_resolution(self):
+        logger.debug(f"Trying to get camera resolution...")
+        logger.debug(f"X...")
+
+        response = self._regular_get_url("get_numx")
+        if response is None:
+            return False, None
+        xres = int(response.json()["value"])
+        response = self._regular_get_url("get_numy")
+        if response is None:
+            return False, None
+        yres = int(response.json()["value"])
+        logger.debug(f"Resolution = {xres}x{yres}")
+        return True, (xres, yres)
 
     def get_possible_binning(self):
-        url = f"http://{self._ip}:{port_for_cameras}/camera/{self._camera_index}/get_maxbinx"
-        logger.debug(f"url = {url}")
-        response = self._get_request(url)
+        response = self._regular_get_url("get_maxbinx")
         if response is None:
             return []
         maxbinx = int(response.json()["value"])
@@ -134,7 +190,9 @@ class MainWindow(QMainWindow):
     def on_bin_radio_clicked(self):
         radio_button = self.sender()
         if radio_button.isChecked():
-            logger.debug(f"Chosen binning: {radio_button.text()}")
+            bin_value = int(radio_button.text().split(" x")[-1])
+            logger.debug(f"Chosen binning: {bin_value}")
+            self.requester.set_binning(bin_value)
 
     def _init_guiding(self, camera_index, camera_name, camera_ip):
         self.camera_index = camera_index
@@ -154,6 +212,7 @@ class MainWindow(QMainWindow):
         self.main_widget = QWidget(self)
         radio_layout = QGridLayout()
         default_bin = self._read_default_bin(self.camera_name)
+        logger.debug("Getting binning...")
         add_binning_radio_button(self, self.requester, radio_layout, self.on_bin_radio_clicked, default_bin)
 
         guiding_layout = QVBoxLayout()
@@ -166,56 +225,15 @@ class MainWindow(QMainWindow):
         self.image_label = ResizeableLabelWithImage(self)
         guiding_layout.addWidget(self.image_label)
 
-
         self.main_widget.setLayout(guiding_layout)
         logger.debug("Setting central widget")
         self.setCentralWidget(self.main_widget)
         self.show()
 
-    def _get_request(self, try_ip, full_url):
-        try:
-            response = requests.get(full_url, timeout=5)
-        except requests.exceptions.Timeout:
-            logger.debug(f"Connection to {try_ip} timed out!")
-            self._error_prompt(f"Connection to {try_ip} timed out!")
-            return None
-
-        except Exception as e:
-            logger.debug(f"Unknown exception: {e}")
-            self._error_prompt(f"Unknown exception when connecting to {try_ip}: {e}")
-            return None
-
-        if response.status_code != 200:
-            logger.debug(f"HTTP error encountered while getting from {try_ip}: "
-                         f"status code={response.status_code}")
-            self._error_prompt(f"HTTP error encountered while getting from {try_ip}:\n"
-                               f"status code={response.status_code}")
-            return None
-        return response
-
-    def _get_resolution(self):
-        logger.debug(f"Trying to get camera resolution...")
-
-        logger.debug(f"X...")
-        url = f"http://{self.camera_ip}:{port_for_cameras}/camera/{self.camera_index}/get_numx"
-        response = self._get_request(self.camera_ip, url)
-        if response is None:
-            return False, None
-        xres = int(response.json()["value"])
-        url = f"http://{self.camera_ip}:{port_for_cameras}/camera/{self.camera_index}/get_numy"
-        response = self._get_request(self.camera_ip, url)
-        if response is None:
-            return False, None
-        yres = int(response.json()["value"])
-        logger.debug(f"Resolution = {xres}x{yres}")
-        return True, (xres, yres)
-
     def _get_last_image(self):
-        is_ok, (w, h) = self._get_resolution()
+        is_ok, (w, h) = self.requester.get_resolution()
         start_time = time.time()
-        url = f"http://{self.camera_ip}:{port_for_cameras}/camera/{self.camera_index}/get_last_image"
-        logger.debug(f"Trying to get last image from camera on {url}")
-        response = self._get_request(self.camera_ip, url)
+        response = self.requester.get_last_image()
         time_elapsed = time.time() - start_time
         logger.debug(f"Time elapsed on receiving response: {time_elapsed}")
         start_time = time.time()
@@ -226,8 +244,8 @@ class MainWindow(QMainWindow):
         logger.debug(response.content[:1024])
 
         img = np.frombuffer(response.content, dtype=np.uint8)
-        logger.debug("Reshaping...")
-        original_img = img.reshape(2072, 1410)
+        logger.debug(f"Reshaping into {w}x{h}...")
+        original_img = img.reshape(w, h)
         logger.debug(f"dimension = {original_img.shape}, Max = {np.max(original_img)}, min = {np.min(original_img)}")
         final_img = normalize_image(original_img)
 
@@ -237,16 +255,6 @@ class MainWindow(QMainWindow):
         # self.image_label.setScaledContents(True)
         time_elapsed = time.time() - start_time
         logger.debug(f"Time elapsed on processing: {time_elapsed}")
-
-    def _camera_demo(self):
-        url = f"http://{self.camera_ip}:{port_for_cameras}/camera/{self.camera_index}/demo"
-        logger.debug(f"Trying to demo camera on {url}")
-        response = self._get_request(self.camera_ip, url)
-        if response is None:
-            return
-        logger.debug(f"Got 200 OK from {url}")
-        if response.headers.get('content-type') == 'application/json':
-            logger.debug(f"Response content = {response.json()}")
 
     def _init_launcher(self):
         self.setWindowTitle("Guiding Launcher")
@@ -333,24 +341,8 @@ class MainWindow(QMainWindow):
     def _get_cameras_list(self):
         try_ip = self.ip_edit.text()
         full_url = f"http://{try_ip}:{port_for_cameras}/cameras_list"
-        logger.debug(f"Getting cameras list from {full_url}")
-        try:
-            response = requests.get(full_url, timeout=5)
-        except requests.exceptions.Timeout:
-            logger.debug(f"Connection to {try_ip} timed out!")
-            self._error_prompt(f"Connection to {try_ip} timed out!")
-            return
-
-        except Exception as e:
-            logger.debug(f"Unknown exception: {e}")
-            self._error_prompt(f"Unknown exception when connecting to {try_ip}: {e}")
-            return
-
-        if response.status_code != 200:
-            logger.debug(f"Could not obtain cameras from {try_ip}: "
-                         f"status code={response.status_code}")
-            self._error_prompt(f"Could not obtain cameras from {try_ip}:\n"
-                               f"status code={response.status_code}")
+        response = standalone_get_request(full_url, self._error_prompt)
+        if response is None:
             return
 
         self._save_to_config({"last_used_ip": try_ip})
@@ -371,31 +363,16 @@ class MainWindow(QMainWindow):
         camera_name = self.camera_chooser_combo.currentText()
         camera_index = self.camera_chooser_combo.currentIndex()
         current_ip = self.ip_edit.text()
-
         logger.debug(f"Connecting to camera {camera_name} at {current_ip}")
-        init_camera_url = f"http://{current_ip}:{port_for_cameras}/init_camera"
+
+        url = f"http://{current_ip}:{port_for_cameras}/camera/{camera_index}/init_camera"
         headers = {"Content-Type": "application/json; charset=utf-8"}
-        data = {"name": camera_name}
-        try:
-            response = requests.post(init_camera_url, headers=headers, json=data, timeout=5)
-        except requests.exceptions.Timeout:
-            logger.debug(f"Connection to {init_camera_url} timed out!")
-            self._error_prompt(f"Connection to {init_camera_url} timed out!")
-            return
+        data = {}
 
-        except Exception as e:
-            logger.debug(f"Unknown exception: {e}")
-            self._error_prompt(f"Unknown exception when connecting to {init_camera_url}: {e}")
-            return
-        if response.status_code != 200:
-            logger.debug(f"Could not initialize camera {camera_name} under {current_ip}: "
-                         f"status code = {response.status_code}")
-            self._error_prompt(f"Could not initialize camera {camera_name} under {current_ip}:\n"
-                               f"status code={response.status_code}")
-            return
-        logger.debug(f"Acquired 200 OK and response: {response.json()}, camera {camera_name} initialized.")
-
-        self._init_guiding(camera_index, camera_name, current_ip)
+        logger.debug(f"About to call POST...")
+        response = standalone_post_request(url, headers, data, self._error_prompt)
+        if response is not None and response.status_code == 200:
+            self._init_guiding(camera_index, camera_name, current_ip)
 
     def _load_ip_from_preset(self, t):
         new_ip = self.preset_ip_items[t]
