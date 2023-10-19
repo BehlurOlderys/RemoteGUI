@@ -1,1 +1,1 @@
-{"saved_ips": {"guiding": "192.168.1.201"}, "last_used_ip": "192.168.1.201", "camera_defaults": {"ZWO ASI294MM Pro": {"default_bin": 2}}}
+{"saved_ips": {"guiding": "192.168.1.201"}, "last_used_ip": "192.168.1.201", "camera_defaults": {"ZWO ASI294MM Pro": {"default_bin": 4, "default_format": "RAW16"}}}

@@ -41,18 +41,21 @@ def write_empty_config_to_file(fp):
         json.dump({}, outfile)
 
 
-def normalize_image(img):
+def normalize_image(img, is16b=False):
     a = np.percentile(img, 5)
     b = np.percentile(img, 95)
     normalized = (img - a) / (b - a)
-    return np.clip(256 * normalized, 0, 255).astype(np.uint8)
+    maxv = 65536 if is16b else 256
+    typv = np.uint16 if is16b else np.uint8
+    return np.clip(maxv * normalized, 0, maxv-1).astype(typv)
 
 
 class ResizeableLabelWithImage(QLabel):
     def __init__(self, parent):
         QLabel.__init__(self, parent)
-        self.setText("<IMAGE>")
-        self._original_image = None
+        bg_img = QImage(320, 200, QImage.Format_Grayscale8)
+        bg_img.fill(Qt.black)
+        self.set_image(bg_img)
 
     def set_image(self, img: QImage):
         self._original_image = QPixmap(img)
@@ -151,8 +154,24 @@ class CameraRequester:
         data = {"value": str(value)}
         return standalone_post_request(url, headers, data, self._error_prompt)
 
+    def set_format(self, value):
+        url = f"http://{self._ip}:{port_for_cameras}/camera/{self._camera_index}/set_readoutmode_str"
+        headers = {"Content-Type": "application/json; charset=utf-8"}
+        data = {"value": str(value)}
+        return standalone_post_request(url, headers, data, self._error_prompt)
+
+    def get_formats(self):
+        return self._regular_get_url("get_readoutmodes")
+
     def get_last_image(self):
         return self._regular_get_url("get_last_image")
+
+    def get_current_format(self):
+        response = self._regular_get_url("get_readoutmode_str")
+        if response is None:
+            return False, None
+        format = response.json()["value"]
+        return True, format
 
     def get_resolution(self):
         logger.debug(f"Trying to get camera resolution...")
@@ -215,8 +234,20 @@ class MainWindow(QMainWindow):
         logger.debug("Getting binning...")
         add_binning_radio_button(self, self.requester, radio_layout, self.on_bin_radio_clicked, default_bin)
 
+        format_layout = QHBoxLayout()
+        self.format_combo = QComboBox()
+        format_values = self._read_possible_formats()
+        self.format_combo.addItems(format_values)
+        self.format_combo.currentTextChanged.connect(self._set_format)
+        logger.debug(f"Trying to read default format...")
+        default_format = self._read_default_format(self.camera_name)
+        logger.debug(f"Default format = {default_format}")
+        self.format_combo.setCurrentText(default_format)
+        format_layout.addWidget(self.format_combo)
+
         guiding_layout = QVBoxLayout()
         guiding_layout.addLayout(radio_layout)
+        guiding_layout.addLayout(format_layout)
         logger.debug("Adding new widgets...")
         self.get_last_image_button = QPushButton("Get last image", self)
         self.get_last_image_button.clicked.connect(self._get_last_image)
@@ -230,8 +261,38 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(self.main_widget)
         self.show()
 
+    def _read_possible_formats(self):
+        response = self.requester.get_formats()
+        if response is None:
+            logger.error("Could not read formats from camera")
+            return []
+        formats = response.json()["value"]
+        logger.debug(f"Formats = {formats}")
+        return formats
+
+    def _set_format(self, t):
+        logger.debug(f"New format chosen: {t}")
+        self.requester.set_format(t)
+
+    def createQImageFromBuffer(self, content, resolution, format):
+        logger.debug(f"Creating image with format {format}")
+        is16b = (format == "RAW16")
+        bufferType = np.uint16 if is16b else np.uint8
+        imageFormat = QImage.Format_Grayscale16 if is16b else QImage.Format_Grayscale8
+
+        img = np.frombuffer(content, dtype=bufferType)
+        w, h = resolution
+        logger.debug(f"Reshaping into {w}x{h}...")
+        original_img = img.reshape(w, h)
+        logger.debug(f"dimension = {original_img.shape}, Max = {np.max(original_img)}, min = {np.min(original_img)}")
+        final_img = normalize_image(original_img, is16b=is16b)
+        logger.debug("Normalized!")
+        qImg = QImage(final_img.data, final_img.shape[0], final_img.shape[1], imageFormat)
+        return qImg
+
     def _get_last_image(self):
         is_ok, (w, h) = self.requester.get_resolution()
+        isOk, current_format = self.requester.get_current_format()
         start_time = time.time()
         response = self.requester.get_last_image()
         time_elapsed = time.time() - start_time
@@ -243,13 +304,8 @@ class MainWindow(QMainWindow):
 
         logger.debug(response.content[:1024])
 
-        img = np.frombuffer(response.content, dtype=np.uint8)
-        logger.debug(f"Reshaping into {w}x{h}...")
-        original_img = img.reshape(w, h)
-        logger.debug(f"dimension = {original_img.shape}, Max = {np.max(original_img)}, min = {np.min(original_img)}")
-        final_img = normalize_image(original_img)
+        qImg = self.createQImageFromBuffer(response.content, [w, h], current_format)
 
-        qImg = QImage(final_img.data, final_img.shape[0], final_img.shape[1], QImage.Format_Grayscale8)
         self.image_label.set_image(qImg)
 
         # self.image_label.setScaledContents(True)
@@ -311,17 +367,22 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(self.main_widget)
         self.show()
 
-    def _read_default_bin(self, camera_name):
+    def _read_default_camera_setting(self, camera_name, setting_name, returned_if_not_found):
         defaults = self.config.get("camera_defaults", {})
         if not defaults:
             logger.warning(f"There are no camera defaults in config")
-            return 1
+            return returned_if_not_found
         camera_config = defaults.get(camera_name, "")
         if not camera_config:
             logger.warning(f"Could not find defaults for {camera_name}")
-            return 1
-        default_bin = camera_config.get("default_bin", 1)
-        return int(default_bin)
+            return returned_if_not_found
+        return camera_config.get(setting_name, returned_if_not_found)
+
+    def _read_default_bin(self, camera_name):
+        return int(self._read_default_camera_setting(camera_name, "default_bin", 1))
+
+    def _read_default_format(self, camera_name):
+        return self._read_default_camera_setting(camera_name, "default_format", "RAW8")
 
     def _read_preset_ips(self):
         d = {"": ""}
