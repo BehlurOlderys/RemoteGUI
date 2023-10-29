@@ -1,5 +1,6 @@
-from PyQt5.QtWidgets import QInputDialog, QErrorMessage, QLabel, QLineEdit, QGridLayout, QHBoxLayout, QMainWindow, QApplication, \
-    QWidget, QVBoxLayout, QPushButton, QComboBox, QRadioButton
+from PyQt5.QtWidgets import QInputDialog, QErrorMessage, QLabel, QLineEdit, QSlider,\
+    QSpinBox, QDoubleSpinBox, QGridLayout, QHBoxLayout, QMainWindow, QApplication, \
+    QWidget, QVBoxLayout, QPushButton, QComboBox, QRadioButton, QSizePolicy
 from PIL import ImageQt, Image
 from skimage.transform import rescale
 from PyQt5.QtGui import QPixmap, QImage, QIcon
@@ -73,18 +74,6 @@ class ResizeableLabelWithImage(QLabel):
         self.resize(self.width(), self.height())
 
 
-def add_binning_radio_button(parent, requester, layout, on_clicked, default_bin):
-    possible_bins = requester.get_possible_binning()
-    for index, bin in enumerate(possible_bins):
-        logger.debug(f"Found binning: x{bin}")
-        radiobutton = QRadioButton(f"bin x{bin}", parent)
-        radiobutton.toggled.connect(on_clicked)
-        if bin == default_bin:
-            logger.debug(f"Setting default binning={default_bin}")
-            radiobutton.setChecked(True)
-        layout.addWidget(radiobutton, 0, index)
-
-
 def null_handler(s):
     pass
 
@@ -145,6 +134,14 @@ class CameraRequester:
         logger.debug(f"Using URL for next request: {url}")
         return self._get_request(url)
 
+    def _regular_set_url(self, what_to_set, value):
+        url = f"http://{self._ip}:{port_for_cameras}/camera/{self._camera_index}/{what_to_set}"
+        headers = {"Content-Type": "application/json; charset=utf-8"}
+        data = {"value": str(value)}
+        logger.debug(f"Sending POST with data: {data}")
+        response = standalone_post_request(url, headers, data, self._error_prompt)
+        logger.debug(f"Acquired response from POST: {response.content}")
+
     def custom_request(self, url):
         return self._get_request(url)
 
@@ -155,10 +152,27 @@ class CameraRequester:
         return standalone_post_request(url, headers, data, self._error_prompt)
 
     def set_format(self, value):
-        url = f"http://{self._ip}:{port_for_cameras}/camera/{self._camera_index}/set_readoutmode_str"
-        headers = {"Content-Type": "application/json; charset=utf-8"}
-        data = {"value": str(value)}
-        return standalone_post_request(url, headers, data, self._error_prompt)
+        return self._regular_set_url("set_readoutmode_str", value)
+
+    def set_gain(self, value):
+        return self._regular_set_url("set_gain", value)
+
+    def get_gain(self):
+        response = self._regular_get_url("get_gain")
+        if response is None:
+            return False, None
+        exposure = response.json()["value"]
+        return True, exposure
+
+    def get_offset(self):
+        response = self._regular_get_url("get_offset")
+        if response is None:
+            return False, None
+        offset = response.json()["value"]
+        return True, offset
+
+    def set_offset(self, value):
+        return self._regular_set_url("set_offset", value)
 
     def get_formats(self):
         return self._regular_get_url("get_readoutmodes")
@@ -172,6 +186,16 @@ class CameraRequester:
             return False, None
         format = response.json()["value"]
         return True, format
+
+    def get_exposure(self):
+        response = self._regular_get_url("get_exposure")
+        if response is None:
+            return False, None
+        exposure = response.json()["value"]
+        return True, exposure
+
+    def set_exposure(self, value):
+        return self._regular_set_url("set_exposure", value)
 
     def get_resolution(self):
         logger.debug(f"Trying to get camera resolution...")
@@ -205,13 +229,135 @@ class MainWindow(QMainWindow):
         self.main_layout = QVBoxLayout()
         self._init_launcher()
         self.requester = None
+        self._exposure_range = "seconds"
+        self._exposure_us = 1000000
 
-    def on_bin_radio_clicked(self):
+    def _changed_exposure(self, value):
+        self._exposure_us = value * 1000.0 if self._exposure_range == "milliseconds" else value * 1000000.0
+        exp_s_str = str(self._exposure_us / 1000000)
+        logger.debug(f"Exposure in us = {self._exposure_us}, seconds={exp_s_str}")
+        self.requester.set_exposure(exp_s_str)
+
+    def _changed_time_range(self, newText):
+        self._exposure_range = newText
+        newValue = self._exposure_us / 1000000.0 if newText == "seconds" else self._exposure_us / 1000.0
+        self._exp_spin.setValue(newValue)
+        logger.debug(f"Exposure range set to: {self._exposure_range}")
+
+    def _changed_binning(self):
         radio_button = self.sender()
         if radio_button.isChecked():
             bin_value = int(radio_button.text().split(" x")[-1])
             logger.debug(f"Chosen binning: {bin_value}")
             self.requester.set_binning(bin_value)
+
+    def _changed_gain(self, value):
+        logger.debug(f"Setting gain to value: {value}")
+        gain_str = str(value)
+        self.requester.set_gain(gain_str)
+
+    def _changed_offset(self, value):
+        logger.debug(f"Setting offset to value: {value}")
+        offset_str = str(value)
+        self.requester.set_offset(offset_str)
+
+    def _changed_format(self, t):
+        logger.debug(f"New format chosen: {t}")
+        self.requester.set_format(t)
+
+    def add_binning_radio(self, layout):
+        default_bin = self._read_default_bin(self.camera_name)
+        logger.debug("Getting binning...")
+        possible_bins = self.requester.get_possible_binning()
+        label = QLabel("Binning:")
+        label.setMaximumSize(100, 20)
+        layout.addWidget(label, 0, 0)
+        for index, bin in enumerate(possible_bins):
+            logger.debug(f"Found binning: x{bin}")
+            radiobutton = QRadioButton(f"bin x{bin}", self)
+            radiobutton.toggled.connect(self._changed_binning)
+            if bin == default_bin:
+                logger.debug(f"Setting default binning={default_bin}")
+                radiobutton.setChecked(True)
+
+            layout.addWidget(radiobutton, 0, index + 1)
+
+    def add_exposure_dial(self, layout):
+        is_ok, exp_raw = self.requester.get_exposure()
+        if not is_ok:
+            logger.error("Could not get current exposure value!")
+            return
+        logger.debug(f"Acquired current exposure: {exp_raw}")
+        exp_us = int(exp_raw)
+        self._exposure_us = exp_us
+        exp_ms = exp_us // 1000
+        exp_s = exp_ms // 1000
+
+        self._exp_spin = QDoubleSpinBox()
+        self._exp_spin.setDecimals(2)
+        self._exp_spin.setRange(0.01, 3600)
+        self._exp_spin.setValue(exp_s)
+        self._exp_spin.valueChanged.connect(self._changed_exposure)
+        label = QLabel("Exposure time:")
+        label.setMaximumSize(100, 20)
+
+        ec = QComboBox()
+        ec.addItems(["seconds", "milliseconds"])
+
+        ec.currentTextChanged.connect(self._changed_time_range)
+        ec.setMaximumSize(100, 20)
+
+        layout.addWidget(label)
+        layout.addWidget(self._exp_spin)
+        layout.addWidget(ec)
+
+    def add_gain_dial(self, layout):
+        is_ok, gain_raw = self.requester.get_gain()
+        if not is_ok:
+            logger.error("Could not get current gain value!")
+            return
+        logger.debug(f"Acquired current gain: {gain_raw}")
+        gain = int(gain_raw)
+        self._gain_spin = QSpinBox()
+        self._gain_spin.setRange(0, 1000)
+        self._gain_spin.setValue(gain)
+        self._gain_spin.valueChanged.connect(self._changed_gain)
+
+        label = QLabel("Gain:")
+        label.setMaximumSize(40, 20)
+        layout.addWidget(label)
+        layout.addWidget(self._gain_spin)
+
+    def add_offset_dial(self, layout):
+        is_ok, offset_raw = self.requester.get_offset()
+        if not is_ok:
+            logger.error("Could not get current offset value!")
+            return
+        logger.debug(f"Acquired current offset: {offset_raw}")
+        offset = int(offset_raw)
+        self._offset_spin = QSpinBox()
+        self._offset_spin.setValue(offset)
+        self._offset_spin.valueChanged.connect(self._changed_offset)
+
+        label = QLabel("Offset:")
+        label.setMaximumSize(50, 20)
+        layout.addWidget(label)
+        layout.addWidget(self._offset_spin)
+
+    def add_format_chooser(self, layout):
+        self.format_combo = QComboBox()
+        format_values = self._read_possible_formats()
+        self.format_combo.addItems(format_values)
+        self.format_combo.currentTextChanged.connect(self._changed_format)
+        logger.debug(f"Trying to read default format...")
+        default_format = self._read_default_format(self.camera_name)
+        logger.debug(f"Default format = {default_format}")
+        self.format_combo.setCurrentText(default_format)
+
+        format_label = QLabel("Image type:")
+        format_label.setMaximumSize(100, 20)
+        layout.addWidget(format_label)
+        layout.addWidget(self.format_combo)
 
     def _init_guiding(self, camera_index, camera_name, camera_ip):
         self.camera_index = camera_index
@@ -229,25 +375,27 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Guiding")
         self.setGeometry(100, 100, 320, 200)
         self.main_widget = QWidget(self)
-        radio_layout = QGridLayout()
-        default_bin = self._read_default_bin(self.camera_name)
-        logger.debug("Getting binning...")
-        add_binning_radio_button(self, self.requester, radio_layout, self.on_bin_radio_clicked, default_bin)
-
-        format_layout = QHBoxLayout()
-        self.format_combo = QComboBox()
-        format_values = self._read_possible_formats()
-        self.format_combo.addItems(format_values)
-        self.format_combo.currentTextChanged.connect(self._set_format)
-        logger.debug(f"Trying to read default format...")
-        default_format = self._read_default_format(self.camera_name)
-        logger.debug(f"Default format = {default_format}")
-        self.format_combo.setCurrentText(default_format)
-        format_layout.addWidget(self.format_combo)
 
         guiding_layout = QVBoxLayout()
-        guiding_layout.addLayout(radio_layout)
+
+        bin_layout = QGridLayout()
+        exposure_layout = QHBoxLayout()
+        gain_layout = QHBoxLayout()
+        offset_layout = QHBoxLayout()
+        format_layout = QHBoxLayout()
+
+        self.add_binning_radio(bin_layout)
+        self.add_exposure_dial(exposure_layout)
+        self.add_gain_dial(gain_layout)
+        self.add_offset_dial(offset_layout)
+        self.add_format_chooser(format_layout)
+
+        guiding_layout.addLayout(bin_layout)
+        guiding_layout.addLayout(exposure_layout)
+        guiding_layout.addLayout(gain_layout)
+        guiding_layout.addLayout(offset_layout)
         guiding_layout.addLayout(format_layout)
+
         logger.debug("Adding new widgets...")
         self.get_last_image_button = QPushButton("Get last image", self)
         self.get_last_image_button.clicked.connect(self._get_last_image)
@@ -269,10 +417,6 @@ class MainWindow(QMainWindow):
         formats = response.json()["value"]
         logger.debug(f"Formats = {formats}")
         return formats
-
-    def _set_format(self, t):
-        logger.debug(f"New format chosen: {t}")
-        self.requester.set_format(t)
 
     def createQImageFromBuffer(self, content, resolution, format):
         logger.debug(f"Creating image with format {format}")
