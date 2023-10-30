@@ -1,7 +1,9 @@
-from PyQt5.QtWidgets import QInputDialog, QErrorMessage, QLabel, QLineEdit, QSlider,\
+from PyQt5.QtWidgets import QStyleFactory, QInputDialog, QErrorMessage, QLabel, QLineEdit, QSlider,\
     QSpinBox, QDoubleSpinBox, QGridLayout, QHBoxLayout, QMainWindow, QApplication, \
     QWidget, QVBoxLayout, QPushButton, QComboBox, QRadioButton, QSizePolicy
-from PIL import ImageQt, Image
+from threading import Event, Timer
+from PIL import Image
+import PIL.ImageQt as PIQt
 from skimage.transform import rescale
 from PyQt5.QtGui import QPixmap, QImage, QIcon
 from PyQt5.QtCore import Qt
@@ -14,6 +16,7 @@ import requests
 import io
 import time
 import numpy as np
+import qdarktheme
 
 
 logger = logging.getLogger(__name__)
@@ -21,6 +24,21 @@ logger = logging.getLogger(__name__)
 
 config_file_path = "config.json"
 port_for_cameras = 8080
+
+interval_last_time = time.time()
+
+
+def interval_polling(stop_event: Event, callback, interval: int):
+    global interval_last_time
+    tick = time.time()
+    callback()
+    logger.debug(f"Passed time = {tick-interval_last_time}")
+    interval_last_time = tick
+    if not stop_event.is_set():
+        Timer(interval, interval_polling, [stop_event, callback, interval]).start()
+
+    else:
+        logger.debug("Interval polling stopped!")
 
 
 def read_json_file_content(fp):
@@ -141,9 +159,16 @@ class CameraRequester:
         logger.debug(f"Sending POST with data: {data}")
         response = standalone_post_request(url, headers, data, self._error_prompt)
         logger.debug(f"Acquired response from POST: {response.content}")
+        return response
 
     def custom_request(self, url):
         return self._get_request(url)
+
+    def start_capturing(self):
+        return self._regular_set_url("set_status", "CAPTURE")
+
+    def stop_capturing(self):
+        return self._regular_set_url("set_status", "IDLE")
 
     def set_binning(self, value):
         url = f"http://{self._ip}:{port_for_cameras}/camera/{self._camera_index}/set_binx"
@@ -177,8 +202,14 @@ class CameraRequester:
     def get_formats(self):
         return self._regular_get_url("get_readoutmodes")
 
-    def get_last_image(self):
-        return self._regular_get_url("get_last_image")
+    def get_last_image(self, send_as_jpg: bool):
+        url = f"http://{self._ip}:{port_for_cameras}/camera/{self._camera_index}/get_last_image"
+        logger.debug(f"Trying to get last image from {url}")
+
+        def request_call():
+            return requests.get(url, params={"format": "jpg" if send_as_jpg else "raw"}, timeout=5)
+
+        return handle_request_call(request_call, url, self._error_prompt)
 
     def get_current_format(self):
         response = self._regular_get_url("get_readoutmode_str")
@@ -193,6 +224,13 @@ class CameraRequester:
             return False, None
         exposure = response.json()["value"]
         return True, exposure
+
+    def get_temp_and_status(self):
+        response = self._regular_get_url("get_tempandstatus")
+        if response is None:
+            return False, None
+        status = response.json()["value"]
+        return True, status
 
     def set_exposure(self, value):
         return self._regular_set_url("set_exposure", value)
@@ -228,9 +266,24 @@ class MainWindow(QMainWindow):
         self.config = read_config()
         self.main_layout = QVBoxLayout()
         self._init_launcher()
-        self.requester = None
+        self.requester: CameraRequester = None
         self._exposure_range = "seconds"
         self._exposure_us = 1000000
+        self._send_as_jpg = False
+        self._continuous_polling = False
+        self._polling_event = Event()
+
+    def closeEvent(self, event):
+        print("========= Shutting down! =========")
+        if not self._polling_event.is_set():
+            print("========= Stopping polling =========")
+            self._polling_event.set()
+        event.accept()
+
+    def __del__(self):
+        if not self._polling_event.is_set():
+            print("========= Stopping polling =========")
+            self._polling_event.set()
 
     def _changed_exposure(self, value):
         self._exposure_us = value * 1000.0 if self._exposure_range == "milliseconds" else value * 1000000.0
@@ -264,6 +317,45 @@ class MainWindow(QMainWindow):
     def _changed_format(self, t):
         logger.debug(f"New format chosen: {t}")
         self.requester.set_format(t)
+
+    def _changed_jpg(self, j):
+        if j == "jpeg":
+            self._send_as_jpg = True
+        elif j == "raw":
+            self._send_as_jpg = False
+
+        logger.debug(f"Changed jpeg to: {j}, value = {str(self._send_as_jpg)}")
+
+    def _refresh_status(self):
+        is_ok, status = self.requester.get_temp_and_status()
+        if is_ok:
+            logger.debug(f"Status = {status}")
+            self._status_label.setText(status["capture_status"])
+            self._temp_label.setText(str(status["temperature"])+"°C")
+        else:
+            logger.error(f"Error while getting status from camera!")
+
+    def _change_polling_interval(self, text_value):
+        logger.debug(f"Changing polling interval to {text_value}")
+
+    def _start_continuous_polling(self):
+        button: QPushButton = self.sender()
+        if button.isChecked():
+            button.setStyleSheet("background-color : #228822")
+            interval_str = self.continuous_poll_cb.currentText()
+            logger.debug(f"Starting to poll for new images with interval {interval_str}")
+            interval = int(interval_str[:-1])
+            response = self.requester.start_capturing()
+            logger.debug(f"Start capturing returned: {response.status_code} with content: {response.json()}")
+            self._polling_event.clear()
+            interval_polling(self._polling_event, self._get_last_image, interval)
+            self._continuous_polling = True
+
+        else:
+            self.requester.stop_capturing()
+            button.setStyleSheet("background-color : black")
+            self._polling_event.set()
+            self._continuous_polling = False
 
     def add_binning_radio(self, layout):
         default_bin = self._read_default_bin(self.camera_name)
@@ -354,10 +446,54 @@ class MainWindow(QMainWindow):
         logger.debug(f"Default format = {default_format}")
         self.format_combo.setCurrentText(default_format)
 
+        self.jpg_combo = QComboBox()
+        self.jpg_combo.addItems(["raw", "jpeg"])
+        self.jpg_combo.setCurrentText("raw")
+        self.jpg_combo.currentTextChanged.connect(self._changed_jpg)
+
         format_label = QLabel("Image type:")
         format_label.setMaximumSize(100, 20)
+
+        transfer_label = QLabel("Send as:")
+        transfer_label.setMaximumSize(60, 20)
+
         layout.addWidget(format_label)
         layout.addWidget(self.format_combo)
+        layout.addWidget(transfer_label)
+        layout.addWidget(self.jpg_combo)
+
+    def add_status_info(self, layout):
+        get_info = QPushButton("Refresh status", self)
+        get_info.clicked.connect(self._refresh_status)
+        self._status_label = QLabel("N/A")
+        self._temp_label = QLabel("N/A")
+        is_ok, status = self.requester.get_temp_and_status()
+        if is_ok:
+            self._status_label.setText(status["capture_status"])
+            self._temp_label.setText(str(status["temperature"])+"°C")
+        layout.addWidget(QLabel("Capture status:"))
+        layout.addWidget(self._status_label)
+        layout.addWidget(QLabel("Temperature:"))
+        layout.addWidget(self._temp_label)
+        layout.addWidget(get_info)
+
+    def add_acquisition(self, layout):
+        self.get_last_image_button = QPushButton("Get last image", self)
+        self.get_last_image_button.clicked.connect(self._get_last_image)
+
+        continuous_polling_button = QPushButton("Poll for images continuously", self)
+        continuous_polling_button.setCheckable(True)
+        continuous_polling_button.setStyleSheet("background-color : black")
+        continuous_polling_button.clicked.connect(self._start_continuous_polling)
+
+        self.continuous_poll_cb = QComboBox()
+        self.continuous_poll_cb.addItems(["0.5s", "1s", "2s"])
+        self.continuous_poll_cb.setCurrentText("1s")
+        self.continuous_poll_cb.currentTextChanged.connect(self._change_polling_interval)
+
+        layout.addWidget(self.get_last_image_button)
+        layout.addWidget(continuous_polling_button)
+        layout.addWidget(self.continuous_poll_cb)
 
     def _init_guiding(self, camera_index, camera_name, camera_ip):
         self.camera_index = camera_index
@@ -373,9 +509,10 @@ class MainWindow(QMainWindow):
         logger.debug("...closed")
 
         self.setWindowTitle("Guiding")
-        self.setGeometry(100, 100, 320, 200)
+        self.setGeometry(100, 100, 400, 400)
         self.main_widget = QWidget(self)
 
+        logger.debug("Adding new widgets...")
         guiding_layout = QVBoxLayout()
 
         bin_layout = QGridLayout()
@@ -383,23 +520,24 @@ class MainWindow(QMainWindow):
         gain_layout = QHBoxLayout()
         offset_layout = QHBoxLayout()
         format_layout = QHBoxLayout()
+        status_info_layout = QHBoxLayout()
+        acquisition_layout = QHBoxLayout()
 
         self.add_binning_radio(bin_layout)
         self.add_exposure_dial(exposure_layout)
         self.add_gain_dial(gain_layout)
         self.add_offset_dial(offset_layout)
         self.add_format_chooser(format_layout)
+        self.add_status_info(status_info_layout)
+        self.add_acquisition(acquisition_layout)
 
         guiding_layout.addLayout(bin_layout)
         guiding_layout.addLayout(exposure_layout)
         guiding_layout.addLayout(gain_layout)
         guiding_layout.addLayout(offset_layout)
         guiding_layout.addLayout(format_layout)
-
-        logger.debug("Adding new widgets...")
-        self.get_last_image_button = QPushButton("Get last image", self)
-        self.get_last_image_button.clicked.connect(self._get_last_image)
-        guiding_layout.addWidget(self.get_last_image_button)
+        guiding_layout.addLayout(status_info_layout)
+        guiding_layout.addLayout(acquisition_layout)
 
         self.image_label = ResizeableLabelWithImage(self)
         guiding_layout.addWidget(self.image_label)
@@ -418,6 +556,13 @@ class MainWindow(QMainWindow):
         logger.debug(f"Formats = {formats}")
         return formats
 
+    def createQImageFromJpg(self, response):
+        logger.debug(f"Creating jpeg image from response...")
+        image = QImage()
+        image.loadFromData(response.content)
+        logger.debug(f"...succeeded!")
+        return image
+    
     def createQImageFromBuffer(self, content, resolution, format):
         logger.debug(f"Creating image with format {format}")
         is16b = (format == "RAW16")
@@ -435,22 +580,30 @@ class MainWindow(QMainWindow):
         return qImg
 
     def _get_last_image(self):
-        is_ok, (w, h) = self.requester.get_resolution()
-        isOk, current_format = self.requester.get_current_format()
-        start_time = time.time()
-        response = self.requester.get_last_image()
-        time_elapsed = time.time() - start_time
-        logger.debug(f"Time elapsed on receiving response: {time_elapsed}")
-        start_time = time.time()
-        logger.debug("Acquired response!")
-        if response is None:
-            return
+        if not self._send_as_jpg:
+            is_ok, (w, h) = self.requester.get_resolution()
+            isOk, current_format = self.requester.get_current_format()
+            start_time = time.time()
+            response = self.requester.get_last_image(self._send_as_jpg)
+            time_elapsed = time.time() - start_time
+            logger.debug(f"Time elapsed on receiving response: {time_elapsed}")
+            start_time = time.time()
+            logger.debug("Acquired response!")
+            if response is None:
+                return
 
-        logger.debug(response.content[:1024])
+            logger.debug(response.content[:1024])
+            qImg = self.createQImageFromBuffer(response.content, [w, h], current_format)
+        else:
+            start_time = time.time()
+            response = self.requester.get_last_image(self._send_as_jpg)
+            time_elapsed = time.time() - start_time
+            logger.debug(f"Time elapsed on receiving response: {time_elapsed}")
+            start_time = time.time()
+            qImg = self.createQImageFromJpg(response)
 
-        qImg = self.createQImageFromBuffer(response.content, [w, h], current_format)
-
-        self.image_label.set_image(qImg)
+        if qImg is not None:
+            self.image_label.set_image(qImg)
 
         # self.image_label.setScaledContents(True)
         time_elapsed = time.time() - start_time
@@ -621,6 +774,9 @@ if __name__ == '__main__':
 
     logger.debug("Now Qt app should start...")
     app = QApplication(sys.argv)
+
+    qdarktheme.setup_theme()
+
     window = MainWindow()
     window.show()
     app.exec()
