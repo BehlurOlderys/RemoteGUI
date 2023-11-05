@@ -1,40 +1,98 @@
-from PyQt5.QtWidgets import QLabel, QHBoxLayout, QWidget, QVBoxLayout, QPushButton, QComboBox
+from PyQt5.QtWidgets import QLabel, QHBoxLayout, QWidget, QVBoxLayout, QPushButton
 import logging
 from exposure_dial_widget import ExposureDial
 from gain_setter_widget import GainSetter
 from binning_radio_widget import BinningRadio
+from offset_dial_widget import OffsetDial
+from format_chooser_widget import FormatChooser
+from temperature_control_widget import TemperatureControl
+from PyQt5.QtGui import QPixmap, QImage, QIcon
+from PyQt5.QtCore import Qt
 import time
+import numpy as np
 from camera_requester import CameraRequester
 from config_manager import save_config
+from PIL import Image
+import PIL.ImageQt as PIQt
+from skimage.transform import rescale
+from threading import Event
+from utils import start_interval_polling
 
 
 logger = logging.getLogger(__name__)
 
 
+def normalize_image(img, is16b=False):
+    a = np.percentile(img, 5)
+    b = np.percentile(img, 95)
+    normalized = (img - a) / (b - a)
+    maxv = 65536 if is16b else 256
+    typv = np.uint16 if is16b else np.uint8
+    return np.clip(maxv * normalized, 0, maxv-1).astype(typv)
+
+
+class ResizeableLabelWithImage(QLabel):
+    def __init__(self, parent):
+        QLabel.__init__(self, parent)
+        bg_img = QImage(320, 200, QImage.Format_Grayscale8)
+        bg_img.fill(Qt.black)
+        self.set_image(bg_img)
+
+    def set_image(self, img: QImage):
+        self._original_image = QPixmap(img)
+        width = self.frameGeometry().width()
+        height = self.frameGeometry().height()
+        logger.debug(f"Label size is currently: {width}x{height} px")
+        qp = self._original_image.scaled(width, height, Qt.KeepAspectRatio)
+        self.setPixmap(qp)
+        self.setMinimumSize(1, 1)
+
+    def resizeEvent(self, event):
+        if self._original_image is not None:
+            pixmap = self._original_image.scaled(self.width(), self.height())
+            self.setPixmap(pixmap)
+        self.resize(self.width(), self.height())
+
+
+def get_widget_refresh_rate_or_none(w):
+    logger.debug(f"Checking for refresh rate in {w}")
+    if hasattr(w, "refresh_rate_s") and callable(getattr(w, "refresh_rate_s")):
+        return w.refresh_rate_s()
+    return None
+
+
 class CameraControlsView(QWidget):
-    def __init__(self, config, ip, camera_index, camera_name, error_prompt):
+    def __init__(self, config, ip, camera_index, camera_name, error_prompt, kill_event):
         super(CameraControlsView, self).__init__()
         self._config = config
         self._camera_name = camera_name
+        self._kill_event = kill_event
 
         self._requester = CameraRequester(ip, camera_index, error_prompt)
         self._refreshable = []
+        self._auto_refresh = []
         self._prepare_ui()
+
+    def _add_custom_widget(self, ctor, *args):
+        widget = ctor(*args)
+        rr = get_widget_refresh_rate_or_none(widget)
+        if rr is not None:
+            new_refresh_event = Event()
+            self._auto_refresh.append(new_refresh_event)
+            start_interval_polling(new_refresh_event, widget.refresh, rr, self._kill_event)
+
+        self._refreshable.append(widget)
+        self._main_layout.addWidget(widget)
 
     def _prepare_ui(self):
         self._main_layout = QVBoxLayout()
 
-        exposure_dial = ExposureDial(self._requester)
-        gain_setter = GainSetter(self._requester)
-        binning_radio = BinningRadio(self._requester, self._read_default_bin())
-
-        self._refreshable.append(exposure_dial)
-        self._refreshable.append(gain_setter)
-        self._refreshable.append(binning_radio)
-
-        self._main_layout.addWidget(exposure_dial)
-        self._main_layout.addWidget(gain_setter)
-        self._main_layout.addWidget(binning_radio)
+        self._add_custom_widget(ExposureDial, self._requester)
+        self._add_custom_widget(GainSetter, self._requester)
+        self._add_custom_widget(OffsetDial, self._requester)
+        self._add_custom_widget(BinningRadio, self._requester, self._read_default_bin())
+        self._add_custom_widget(FormatChooser, self._requester, self._read_default_format())
+        self._add_custom_widget(TemperatureControl, self._requester)
 
         refresh_layout = QHBoxLayout()
         refresh_button = QPushButton("Refresh parameters", self)
@@ -61,38 +119,15 @@ class CameraControlsView(QWidget):
     def _read_default_bin(self):
         return int(self._read_default_camera_setting("default_bin", 1))
 
+    def _read_default_format(self):
+        return self._read_default_camera_setting("default_format", "RAW8")
 
-    # def closeEvent(self, event):
-    #     print("========= Shutting down! =========")
-    #     if not self._polling_event.is_set():
-    #         print("========= Stopping polling =========")
-    #         self._polling_event.set()
-    #     event.accept()
-    #
-    # def __del__(self):
-    #     if not self._polling_event.is_set():
-    #         print("========= Stopping polling =========")
-    #         self._polling_event.set()
+
+
     #
 
     #
-    # def _changed_offset(self, value):
-    #     logger.debug(f"Setting offset to value: {value}")
-    #     offset_str = str(value)
-    #     self.requester.set_offset(offset_str)
-    #
-    # def _changed_format(self, t):
-    #     logger.debug(f"New format chosen: {t}")
-    #     self.requester.set_format(t)
-    #
-    # def _changed_jpg(self, j):
-    #     if j == "jpeg":
-    #         self._send_as_jpg = True
-    #     elif j == "raw":
-    #         self._send_as_jpg = False
-    #
-    #     logger.debug(f"Changed jpeg to: {j}, value = {str(self._send_as_jpg)}")
-    #
+
     # def _refresh_status(self):
     #     is_ok, status = self.requester.get_temp_and_status()
     #     if is_ok:
@@ -127,48 +162,9 @@ class CameraControlsView(QWidget):
     #
     #
    #
-    # def add_offset_dial(self, layout):
-    #     is_ok, offset_raw = self.requester.get_offset()
-    #     if not is_ok:
-    #         logger.error("Could not get current offset value!")
-    #         return
-    #     logger.debug(f"Acquired current offset: {offset_raw}")
-    #     offset = int(offset_raw)
-    #     self._offset_spin = QSpinBox()
-    #     self._offset_spin.setValue(offset)
-    #     self._offset_spin.valueChanged.connect(self._changed_offset)
     #
-    #     label = QLabel("Offset:")
-    #     label.setMaximumSize(50, 20)
-    #     layout.addWidget(label)
-    #     layout.addWidget(self._offset_spin)
     #
-    # def add_format_chooser(self, layout):
-    #     self.format_combo = QComboBox()
-    #     format_values = self._read_possible_formats()
-    #     self.format_combo.addItems(format_values)
-    #     self.format_combo.currentTextChanged.connect(self._changed_format)
-    #     logger.debug(f"Trying to read default format...")
-    #     default_format = self._read_default_format(self.camera_name)
-    #     logger.debug(f"Default format = {default_format}")
-    #     self.format_combo.setCurrentText(default_format)
-    #
-    #     self.jpg_combo = QComboBox()
-    #     self.jpg_combo.addItems(["raw", "jpeg"])
-    #     self.jpg_combo.setCurrentText("raw")
-    #     self.jpg_combo.currentTextChanged.connect(self._changed_jpg)
-    #
-    #     format_label = QLabel("Image type:")
-    #     format_label.setMaximumSize(100, 20)
-    #
-    #     transfer_label = QLabel("Send as:")
-    #     transfer_label.setMaximumSize(60, 20)
-    #
-    #     layout.addWidget(format_label)
-    #     layout.addWidget(self.format_combo)
-    #     layout.addWidget(transfer_label)
-    #     layout.addWidget(self.jpg_combo)
-    #
+
     # def add_status_info(self, layout):
     #     get_info = QPushButton("Refresh status", self)
     #     get_info.clicked.connect(self._refresh_status)
@@ -201,65 +197,8 @@ class CameraControlsView(QWidget):
     #     layout.addWidget(self.get_last_image_button)
     #     layout.addWidget(continuous_polling_button)
     #     layout.addWidget(self.continuous_poll_cb)
-    #
-    # def _init_guiding(self, camera_index, camera_name, camera_ip):
-    #     self.camera_index = camera_index
-    #     self.camera_name = camera_name
-    #     self.camera_ip = camera_ip
-    #     self.requester = CameraRequester(self.camera_ip, self.camera_index, self._error_prompt)
-    #
-    #     logger.debug("Closing myself...")
-    #     self.main_layout.removeWidget(self.main_widget)
-    #     self.main_widget.setParent(None)
-    #     self.main_widget = None
-    #     self.close()
-    #     logger.debug("...closed")
-    #
-    #     self.setWindowTitle("Guiding")
-    #     self.setGeometry(100, 100, 400, 400)
-    #     self.main_widget = QWidget(self)
-    #
-    #     logger.debug("Adding new widgets...")
-    #     guiding_layout = QVBoxLayout()
-    #
-    #     bin_layout = QGridLayout()
-    #     exposure_layout = QHBoxLayout()
-    #     offset_layout = QHBoxLayout()
-    #     format_layout = QHBoxLayout()
-    #     status_info_layout = QHBoxLayout()
-    #     acquisition_layout = QHBoxLayout()
-    #
-    #     self.add_binning_radio(bin_layout)
-    #     self.add_exposure_dial(exposure_layout)
-    #     self.add_offset_dial(offset_layout)
-    #     self.add_format_chooser(format_layout)
-    #     self.add_status_info(status_info_layout)
-    #     self.add_acquisition(acquisition_layout)
-    #
-    #     guiding_layout.addLayout(bin_layout)
-    #     guiding_layout.addLayout(exposure_layout)
-    #     guiding_layout.addLayout(self._gain_setter.get_layout())
-    #     guiding_layout.addLayout(offset_layout)
-    #     guiding_layout.addLayout(format_layout)
-    #     guiding_layout.addLayout(status_info_layout)
-    #     guiding_layout.addLayout(acquisition_layout)
-    #
-    #     self.image_label = ResizeableLabelWithImage(self)
-    #     guiding_layout.addWidget(self.image_label)
-    #
-    #     self.main_widget.setLayout(guiding_layout)
-    #     logger.debug("Setting central widget")
-    #     self.setCentralWidget(self.main_widget)
-    #     self.show()
-    #
-    # def _read_possible_formats(self):
-    #     response = self.requester.get_formats()
-    #     if response is None:
-    #         logger.error("Could not read formats from camera")
-    #         return []
-    #     formats = response.json()["value"]
-    #     logger.debug(f"Formats = {formats}")
-    #     return formats
+
+
     #
     # def createQImageFromJpg(self, response):
     #     logger.debug(f"Creating jpeg image from response...")
@@ -314,9 +253,6 @@ class CameraControlsView(QWidget):
     #     time_elapsed = time.time() - start_time
     #     logger.debug(f"Time elapsed on processing: {time_elapsed}")
 
-    # def _read_default_format(self, camera_name):
-    #     return self._read_default_camera_setting(camera_name, "default_format", "RAW8")
-    #
     # def _save_config(self):
     #     save_config(self.config)
     #

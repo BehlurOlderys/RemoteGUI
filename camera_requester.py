@@ -76,6 +76,17 @@ class CameraRequester:
         logger.debug(f"Acquired response from POST: {response.content}")
         return response
 
+    def _get_pair_success_and_value(self, endpoint):
+        response = self._regular_get_url(endpoint)
+        if response is None:
+            return False, None
+        try:
+            value = response.json()["value"]
+        except Exception as e:
+            logger.error(e)
+            return False, None
+        return True, value
+
     def custom_request(self, url):
         return self._get_request(url)
 
@@ -98,24 +109,16 @@ class CameraRequester:
         return self._regular_set_url("set_gain", value)
 
     def get_gain(self):
-        response = self._regular_get_url("get_gain")
-        if response is None:
-            return False, None
-        exposure = response.json()["value"]
-        return True, exposure
+        return self._get_pair_success_and_value("get_gain")
 
     def get_offset(self):
-        response = self._regular_get_url("get_offset")
-        if response is None:
-            return False, None
-        offset = response.json()["value"]
-        return True, offset
+        return self._get_pair_success_and_value("get_offset")
 
     def set_offset(self, value):
         return self._regular_set_url("set_offset", value)
 
     def get_formats(self):
-        return self._regular_get_url("get_readoutmodes")
+        return self._get_pair_success_and_value("get_readoutmodes")
 
     def get_last_image(self, send_as_jpg: bool):
         url = f"http://{self._ip}:{port_for_cameras}/camera/{self._camera_index}/get_last_image"
@@ -127,50 +130,57 @@ class CameraRequester:
         return handle_request_call(request_call, url, self._error_prompt)
 
     def get_current_format(self):
-        response = self._regular_get_url("get_readoutmode_str")
-        if response is None:
-            return False, None
-        current_format = response.json()["value"]
-        return True, current_format
+        return self._get_pair_success_and_value("get_readoutmode_str")
 
     def get_exposure(self):
-        response = self._regular_get_url("get_exposure")
-        if response is None:
-            return False, None
-        exposure = response.json()["value"]
-        return True, exposure
+        return self._get_pair_success_and_value("get_exposure")
 
     def get_temp_and_status(self):
-        response = self._regular_get_url("get_tempandstatus")
-        if response is None:
-            return False, None
-        status = response.json()["value"]
-        return True, status
+        return self._get_pair_success_and_value("get_tempandstatus")
 
     def set_exposure(self, value):
         return self._regular_set_url("set_exposure", value)
+
+    def get_temperature(self):
+        return self._get_pair_success_and_value("get_ccdtemperature")
+
+    def get_cooler_on(self):
+        return self._get_pair_success_and_value("get_cooleron")
+
+    def get_can_turn_on_cooler(self):
+        return self._get_pair_success_and_value("get_cansetcooleron")
+
+    def get_can_set_temp(self):
+        return self._get_pair_success_and_value("get_cansetccdtemperature")
+
+    def get_set_temp(self):
+        return self._get_pair_success_and_value("get_setccdtemperature")
+
+    def set_set_temp(self, value: int):
+        return self._regular_set_url("set_setccdtemperature", value)
+
+    def set_cooler_on(self, value: bool):
+        return self._regular_set_url("set_cooleron", bool(value))
 
     def get_resolution(self):
         logger.debug(f"Trying to get camera resolution...")
         logger.debug(f"X...")
 
-        response = self._regular_get_url("get_numx")
-        if response is None:
+        is_okx, numx = self._get_pair_success_and_value("get_numx")
+        is_oky, numy = self._get_pair_success_and_value("get_numy")
+
+        if not is_oky or not is_okx:
             return False, None
-        xres = int(response.json()["value"])
-        response = self._regular_get_url("get_numy")
-        if response is None:
-            return False, None
-        yres = int(response.json()["value"])
+
+        xres = int(numx)
+        yres = int(numy)
+
         logger.debug(f"Resolution = {xres}x{yres}")
         return True, (xres, yres)
 
-
-
     def get_possible_binning(self):
-        response = self._regular_get_url("get_maxbinx")
-        if response is None:
+        is_ok, maxbin = self._get_pair_success_and_value("get_maxbinx")
+        if not is_ok:
             return []
-        maxbinx = int(response.json()["value"])
-        logger.debug(f"Max possible bin is {maxbinx}")
-        return list(range(1, maxbinx+1))
+        logger.debug(f"Max possible bin is {maxbin}")
+        return list(range(1, maxbin+1))

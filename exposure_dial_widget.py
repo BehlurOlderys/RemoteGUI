@@ -11,6 +11,8 @@ class ExposureDial(QWidget):
         self._requester = requester
         self._layout = QHBoxLayout()
         self._exp_spin = QDoubleSpinBox()
+        self._exposure_range = "seconds"
+        self._exposure_us = 1000000
 
         self._exp_range_combo = QComboBox()
         self._exp_range_combo.addItems(["seconds", "milliseconds"])
