@@ -20,6 +20,7 @@ class OffsetDial(QWidget):
         self._layout.addWidget(label)
         self._layout.addWidget(self._offset_spin)
         self.setLayout(self._layout)
+        self.setMaximumSize(150, 50)
 
     def _changed_offset(self, value):
         logger.debug(f"Setting offset to value: {value}")

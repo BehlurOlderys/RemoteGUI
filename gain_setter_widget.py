@@ -21,6 +21,7 @@ class GainSetter(QWidget):
         self._layout.addWidget(label)
         self._layout.addWidget(self._gain_spin)
         self.setLayout(self._layout)
+        self.setMaximumSize(150, 50)
 
     def _refresh_impl(self):
         is_ok, gain_raw = self._requester.get_gain()

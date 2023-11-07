@@ -10,6 +10,7 @@ class FormatChooser(QWidget):
         super(FormatChooser, self).__init__()
         self._requester = requester
         self._layout = QHBoxLayout()
+        self._send_as_jpg = True
 
         self.format_combo = QComboBox()
         format_values = self._read_possible_formats()
@@ -19,7 +20,7 @@ class FormatChooser(QWidget):
         self.format_combo.setCurrentText(default_format)
 
         self.jpg_combo = QComboBox()
-        self.jpg_combo.addItems(["raw", "jpeg"])
+        self.jpg_combo.addItems(["jpg", "raw"])
         self.jpg_combo.setCurrentText("raw")
         self.jpg_combo.currentTextChanged.connect(self._changed_jpg)
 
@@ -35,6 +36,7 @@ class FormatChooser(QWidget):
         self._layout.addWidget(self.jpg_combo)
 
         self.setLayout(self._layout)
+        self.setMaximumSize(300, 50)
 
     def _read_possible_formats(self):
         is_ok, formats = self._requester.get_formats()
@@ -48,12 +50,12 @@ class FormatChooser(QWidget):
         self._requester.set_format(t)
 
     def _changed_jpg(self, j):
-        if j == "jpeg":
+        if j == "jpg":
             self._send_as_jpg = True
         elif j == "raw":
             self._send_as_jpg = False
 
-        logger.debug(f"Changed jpeg to: {j}, value = {str(self._send_as_jpg)}")
+        logger.debug(f"Changed jpg to: {j}, value = {str(self._send_as_jpg)}")
 
     def should_send_jpg(self):
         return self._send_as_jpg

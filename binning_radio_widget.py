@@ -20,7 +20,7 @@ class BinningRadio(QWidget):
 
         for index, binning in enumerate(possible_bins):
             logger.debug(f"Found binning: x{binning}")
-            radiobutton = QRadioButton(f"bin x{binning}", self)
+            radiobutton = QRadioButton(f"x{binning}", self)
             self._radios.append(radiobutton)
             radiobutton.toggled.connect(self._changed_binning)
             if binning == self._default_bin:
@@ -31,11 +31,12 @@ class BinningRadio(QWidget):
         self._layout.addWidget(label, 0, 0)
 
         self.setLayout(self._layout)
+        self.setMaximumSize(300, 50)
 
     def _changed_binning(self):
         radio_button = self.sender()
         if radio_button.isChecked():
-            bin_value = int(radio_button.text().split(" x")[-1])
+            bin_value = int(radio_button.text().split("x")[-1])
             logger.debug(f"Chosen binning: {bin_value}")
             self._requester.set_binning(bin_value)
 

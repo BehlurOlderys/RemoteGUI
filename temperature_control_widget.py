@@ -28,7 +28,6 @@ class TemperatureControl(QWidget):
             self._cooler_on_button.setDisabled(True)
 
         self._layout.addWidget(self._cooler_on_button)
-        self._refresh_impl()
 
         set_temp_spin = QSpinBox()
         is_ok, can_set_temp = self._requester.get_can_set_temp()
@@ -43,9 +42,22 @@ class TemperatureControl(QWidget):
 
         self._layout.addWidget(QLabel("Target temperature:"), alignment=Qt.AlignRight)
         self._layout.addWidget(set_temp_spin, alignment=Qt.AlignLeft)
-        self._layout.addWidget(QLabel("°C"), alignment=Qt.AlignLeft)
+        c_degree = QLabel("°C")
+        c_degree.setMaximumSize(20, 20)
+        self._layout.addWidget(c_degree, alignment=Qt.AlignLeft)
 
+        self._layout.addWidget(QLabel("Cooler power:"), alignment=Qt.AlignRight)
+        self._cooler_power_label = QLabel("N/A")
+        self._cooler_power_label.setDisabled(True)
+
+        is_ok, can_get_power = self._requester.get_can_get_cooler_power()
+        if is_ok and can_get_power:
+            self._cooler_power_label.setDisabled(False)
+
+        self._refresh_impl()
+        self._layout.addWidget(self._cooler_power_label, alignment=Qt.AlignLeft)
         self.setLayout(self._layout)
+        self.setMaximumSize(600, 50)
 
     def _turn_cooler_on(self):
         button: QPushButton = self.sender()
@@ -72,6 +84,10 @@ class TemperatureControl(QWidget):
                 self._cooler_on_button.setChecked(True)
             else:
                 self._cooler_on_button.setChecked(False)
+        if self._cooler_power_label.isEnabled():
+            is_ok, power = self._requester.get_cooler_power()
+            logger.debug(f"Cooling power at {power}%")
+            self._cooler_power_label.setText(f"{power}%")
 
     def refresh(self):
         logger.debug("Refreshing temperature info...")

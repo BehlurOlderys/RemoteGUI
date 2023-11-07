@@ -23,6 +23,7 @@ class ExposureDial(QWidget):
         self._refresh_impl()
 
         self._exp_spin.valueChanged.connect(self._changed_exposure)
+        self._exp_spin.setMaximumSize(120, 50)
 
         label = QLabel("Exposure time:")
         label.setMaximumSize(100, 20)
@@ -32,6 +33,7 @@ class ExposureDial(QWidget):
         self._layout.addWidget(self._exp_range_combo)
 
         self.setLayout(self._layout)
+        self.setMaximumSize(250, 50)
 
     def _changed_exposure(self, value):
         self._exposure_us = value * 1000.0 if self._exposure_range == "milliseconds" else value * 1000000.0

@@ -135,8 +135,8 @@ class CameraRequester:
     def get_exposure(self):
         return self._get_pair_success_and_value("get_exposure")
 
-    def get_temp_and_status(self):
-        return self._get_pair_success_and_value("get_tempandstatus")
+    def get_status(self):
+        return self._get_pair_success_and_value("get_status")
 
     def set_exposure(self, value):
         return self._regular_set_url("set_exposure", value)
@@ -152,6 +152,12 @@ class CameraRequester:
 
     def get_can_set_temp(self):
         return self._get_pair_success_and_value("get_cansetccdtemperature")
+
+    def get_can_get_cooler_power(self):
+        return self._get_pair_success_and_value("get_cangetcoolerpower")
+
+    def get_cooler_power(self):
+        return self._get_pair_success_and_value("get_coolerpower")
 
     def get_set_temp(self):
         return self._get_pair_success_and_value("get_setccdtemperature")
