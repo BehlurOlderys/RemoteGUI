@@ -6,8 +6,10 @@ from binning_radio_widget import BinningRadio
 from offset_dial_widget import OffsetDial
 from format_chooser_widget import FormatChooser
 from temperature_control_widget import TemperatureControl
+from resizeable_label_with_image import ResizeableLabelWithImage
 from PyQt5.QtGui import QPixmap, QImage, QIcon
 from PyQt5.QtCore import Qt
+from PyQt5.QtGui import QCloseEvent
 import time
 import numpy as np
 from camera_requester import CameraRequester
@@ -29,30 +31,6 @@ def normalize_image(img, is16b=False):
     maxv = 65536 if is16b else 256
     typv = np.uint16 if is16b else np.uint8
     return np.clip(maxv * normalized, 0, maxv-1).astype(typv)
-
-
-class ResizeableLabelWithImage(QLabel):
-    def __init__(self, parent):
-        QLabel.__init__(self, parent)
-        bg_img = QImage(320, 200, QImage.Format_Grayscale8)
-        bg_img.fill(Qt.black)
-        self.set_image(bg_img)
-        self.setMinimumSize(640, 480)
-
-    def set_image(self, img: QImage):
-        self._original_image = QPixmap(img)
-        width = self.frameGeometry().width()
-        height = self.frameGeometry().height()
-        logger.debug(f"Label size is currently: {width}x{height} px")
-        qp = self._original_image.scaled(width, height, Qt.KeepAspectRatio)
-        self.setPixmap(qp)
-        self.setMinimumSize(1, 1)
-
-    def resizeEvent(self, event):
-        if self._original_image is not None:
-            pixmap = self._original_image.scaled(self.width(), self.height())
-            self.setPixmap(pixmap)
-        self.resize(self.width(), self.height())
 
 
 def get_widget_refresh_rate_or_none(w):
@@ -100,6 +78,13 @@ class CameraControlsView(QWidget):
         self._continuous_polling = False
         self._polling_event = Event()
         self._prepare_ui()
+
+    def __del__(self):
+        self._requester.stop_capturing()
+        logger.debug("__del__ camera controls view")
+
+    def close(self):
+        logger.debug("Closing camera controls view")
 
     def _add_auto_task(self, refresh_rate, callback):
         new_refresh_event = Event()
