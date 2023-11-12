@@ -55,8 +55,8 @@ class ExposureDial(QWidget):
         logger.debug(f"Acquired current exposure: {exp_raw}")
         exp_us = int(exp_raw)
         self._exposure_us = exp_us
-        exp_ms = exp_us // 1000
-        exp_s = exp_ms // 1000
+        exp_ms = exp_us / 1000
+        exp_s = exp_ms / 1000
 
         self._exp_spin.setDecimals(2)
         self._exp_spin.setRange(0.01, 3600)
@@ -69,4 +69,3 @@ class ExposureDial(QWidget):
     def refresh(self):
         logger.debug("Refreshing exposure info...")
         self._refresh_impl()
-

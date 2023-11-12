@@ -1,9 +1,8 @@
-from PyQt5.QtWidgets import QErrorMessage, QLabel, QMainWindow, QApplication, QVBoxLayout
+from PyQt5.QtWidgets import QErrorMessage, QMainWindow, QApplication, QVBoxLayout
 from camera_controls_view import CameraControlsView
 from launcher_view import LauncherView
 from config_manager import read_config, init_config
-from PyQt5.QtGui import QPixmap, QImage, QIcon
-from PyQt5.QtCore import Qt
+from PyQt5.QtGui import QIcon
 import sys
 import logging
 from logging.handlers import RotatingFileHandler
