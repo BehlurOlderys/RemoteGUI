@@ -67,14 +67,29 @@ class CameraRequester:
         logger.debug(f"Using URL for next request: {url}")
         return self._get_request(url)
 
-    def _regular_set_url(self, what_to_set, value):
+    def _regular_set_url(self, what_to_set, value=None):
+        value_str = str(value) if value is not None else ""
+        return self._custom_value_set_url(what_to_set, {"value": value_str})
+
+    def _custom_value_set_url(self, what_to_set, value_dict):
         url = f"http://{self._ip}:{port_for_cameras}/camera/{self._camera_index}/{what_to_set}"
         headers = {"Content-Type": "application/json; charset=utf-8"}
-        data = {"value": str(value)}
+        data = value_dict
         logger.debug(f"Sending POST with data: {data}")
         response = standalone_post_request(url, headers, data, self._error_prompt)
         logger.debug(f"Acquired response from POST: {response.content}")
         return response
+
+    # def _get_success_and_dict(self, endpoint):
+    #     response = self._regular_get_url(endpoint)
+    #     if response is None:
+    #         return False, None
+    #     try:
+    #         value = response.json()
+    #     except Exception as e:
+    #         logger.error(e)
+    #         return False, None
+    #     return True, value
 
     def _get_pair_success_and_value(self, endpoint):
         response = self._regular_get_url(endpoint)
@@ -91,10 +106,16 @@ class CameraRequester:
         return self._get_request(url)
 
     def start_capturing(self):
-        return self._regular_set_url("set_status", "CAPTURE")
+        return self._regular_set_url("start_capturing")
 
     def stop_capturing(self):
-        return self._regular_set_url("set_status", "IDLE")
+        return self._regular_set_url("stop_capturing")
+
+    def start_saving(self, number, dir_name, prefix=""):
+        return self._custom_value_set_url("start_saving", {"number": number, "dir_name": dir_name, "prefix": prefix})
+
+    def stop_saving(self):
+        return self._regular_set_url("stop_saving")
 
     def set_binning(self, value):
         url = f"http://{self._ip}:{port_for_cameras}/camera/{self._camera_index}/set_binx"
@@ -137,6 +158,7 @@ class CameraRequester:
 
     def get_status(self):
         return self._get_pair_success_and_value("get_status")
+        return self._get_success_and_dict("get_status")
 
     def set_exposure(self, value):
         return self._regular_set_url("set_exposure", value)

@@ -1,6 +1,8 @@
 import logging
-from PyQt5.QtWidgets import QWidget, QLabel, QComboBox, QHBoxLayout, QPushButton
+from PyQt5.QtWidgets import QWidget, QLabel, QComboBox, QVBoxLayout, QHBoxLayout, QPushButton, QLineEdit, QSpinBox, \
+    QProgressBar
 from PyQt5.QtGui import QImage
+from PyQt5.QtCore import Qt
 from utils import start_interval_polling
 from threading import Event
 from time import time
@@ -54,32 +56,97 @@ class ImageAcquisition(QWidget):
         self._polling_event = Event()
         self._kill_event = kill_event
 
-        self._layout = QHBoxLayout()
+        self._layout = QVBoxLayout()
+        top_layout = QHBoxLayout()
+        bottom_layout = QHBoxLayout()
 
-        self._get_last_image_button = QPushButton("Get last image", self)
-        self._get_last_image_button.clicked.connect(self._get_last_image)
+        # self._get_last_image_button = QPushButton("Get last image", self)
+        # self._get_last_image_button.setMaximumSize(100, 50)
+        # self._get_last_image_button.clicked.connect(self._get_last_image)
 
         continuous_polling_button = QPushButton("Poll for images continuously", self)
+        continuous_polling_button.setMaximumSize(150, 50)
         continuous_polling_button.setCheckable(True)
         continuous_polling_button.setStyleSheet("background-color : black")
         continuous_polling_button.clicked.connect(self._start_continuous_polling)
 
         self._continuous_poll_cb = QComboBox()
+        self._continuous_poll_cb.setMaximumSize(100, 50)
         self._continuous_poll_cb.addItems(["0.5s", "1s", "2s"])
         self._continuous_poll_cb.setCurrentText("1s")
+
+        self._save_button = QPushButton("Save images")
+        self._save_button.setMaximumSize(100, 50)
+        self._save_button.setCheckable(True)
+        self._save_button.setStyleSheet("background-color : black")
+        self._save_button.clicked.connect(self._start_saving)
+        self._save_button.setDisabled(True)
+
+        self._saved_number_spin = QSpinBox()
+        self._saved_number_spin.setRange(1, 1000)
+        self._saved_number_spin.setMaximumSize(50, 50)
+
+        self._save_dir_edit = QLineEdit("Capture")
+        self._save_dir_edit.setMaximumSize(150, 50)
+
+        save_dir_label = QLabel("Save directory:")
+        save_dir_label.setMaximumSize(100, 50)
+        capture_type_label = QLabel("Type of images:")
+        capture_type_label.setMaximumSize(100, 50)
+
+        self._capture_type_cb = QComboBox()
+        self._capture_type_cb.setMaximumSize(100, 50)
+        self._capture_type_cb.addItems(["light", "dark", "bias", "flat"])
+        self._capture_type_cb.setCurrentText("light")
 
         self._status_label = QLabel("Status: N/A")
         self._refresh_impl()
 
-        self._layout.addWidget(self._get_last_image_button)
-        self._layout.addWidget(continuous_polling_button)
-        self._layout.addWidget(self._continuous_poll_cb)
-        self._layout.addWidget(self._status_label)
+        self._capture_progress_bar = QProgressBar()
+        # self._capture_progress_bar.setTextVisible(True)
+        self._capture_progress_bar.setFormat("%v / %m")
+        # self._capture_progress_bar.setValue(70)
+        # self._capture_progress_bar.setAlignment(Qt.AlignCenter)
+
+        # self._layout.addWidget(self._get_last_image_button)
+        top_layout.addWidget(self._status_label)
+        top_layout.addWidget(continuous_polling_button)
+        top_layout.addWidget(self._continuous_poll_cb)
+
+        bottom_layout.addWidget(self._save_button)
+        bottom_layout.addWidget(self._saved_number_spin)
+        bottom_layout.addWidget(save_dir_label)
+        bottom_layout.addWidget(self._save_dir_edit)
+        bottom_layout.addWidget(capture_type_label)
+        bottom_layout.addWidget(self._capture_type_cb)
+
+        self._layout.addLayout(top_layout)
+        self._layout.addLayout(bottom_layout)
+        self._layout.addWidget(self._capture_progress_bar)
         self.setLayout(self._layout)
 
     @staticmethod
     def refresh_rate_s():
         return 3
+
+    def _start_saving(self):
+        button: QPushButton = self.sender()
+        if button.isChecked():
+            button.setStyleSheet("background-color : #228822")
+
+            dir_name = self._save_dir_edit.text()
+            number = int(self._saved_number_spin.value())
+            prefix = self._capture_type_cb.currentText()
+
+            self._capture_progress_bar.setMaximum(number)
+            self._capture_progress_bar.setValue(0)
+
+            logger.debug(f"Starting to save {number} new images in dir{dir_name} with prefix {prefix}")
+            response = self._requester.start_saving(number, dir_name, prefix)
+            logger.debug(f"Start saving returned: {response.status_code} with content: {response.json()}")
+        else:
+            logger.debug("Stop saving clicked")
+            self._stop_saving_impl()
 
     def _get_last_image(self):
         logger.debug("Getting last image")
@@ -129,19 +196,40 @@ class ImageAcquisition(QWidget):
             self._polling_event.clear()
             start_interval_polling(self._polling_event, self._get_last_image, interval, self._kill_event)
             self._continuous_polling = True
+            self._save_button.setEnabled(True)
 
         else:
+            self._stop_saving_impl()
+            self._save_button.setDisabled(True)
+
             self._requester.stop_capturing()
             button.setStyleSheet("background-color : black")
             self._polling_event.set()
             self._continuous_polling = False
             self._continuous_poll_cb.setEnabled(True)
 
+    def _saving_button_off(self):
+        self._save_button.setChecked(False)
+        self._save_button.setStyleSheet("background-color : black")
+
+    def _stop_saving_impl(self):
+        self._saving_button_off()
+        self._requester.stop_saving()
+
     def _refresh_impl(self):
         logger.debug("Refreshing status label")
         is_ok, status = self._requester.get_status()
         if is_ok:
-            self._status_label.setText(f"Status: {status}")
+            logger.debug(f"Acquired status: {status}")
+            state = status.get("state", "<UNKNOWN>")
+            if state == "SAVE":
+                number = int(status.get("number", "0"))
+                self._capture_progress_bar.setValue(number+1)
+
+            self._status_label.setText(f"Status: {state}")
+            if self._save_button.isChecked() and (state != "SAVE"):
+                # self._capture_progress_bar.reset()
+                self._saving_button_off()
 
     def refresh(self):
         logger.debug("Refreshing acquisition controls...")
