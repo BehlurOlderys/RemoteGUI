@@ -6,6 +6,7 @@ from PyQt5.QtCore import Qt
 from utils import start_interval_polling
 from threading import Event
 from time import time
+
 import numpy as np
 
 
@@ -35,7 +36,7 @@ def qimage_from_buffer(content, resolution, image_format):
     final_img = normalize_image(original_img, is16b=is16b)
     logger.debug("Normalized!")
     q_img = QImage(final_img.data, final_img.shape[0], final_img.shape[1], image_format)
-    return q_img
+    return q_img, final_img
 
 
 def qimage_from_jpg(response):
@@ -47,11 +48,12 @@ def qimage_from_jpg(response):
 
 
 class ImageAcquisition(QWidget):
-    def __init__(self, requester, format_chooser, image_label, kill_event: Event):
+    def __init__(self, requester, format_chooser, image_label, hist_plotter, kill_event: Event):
         super(ImageAcquisition, self).__init__()
         self._requester = requester
         self._format_chooser = format_chooser
         self._image_label = image_label
+        self._hist_plotter = hist_plotter
         self._continuous_polling = False
         self._polling_event = Event()
         self._kill_event = kill_event
@@ -64,11 +66,11 @@ class ImageAcquisition(QWidget):
         # self._get_last_image_button.setMaximumSize(100, 50)
         # self._get_last_image_button.clicked.connect(self._get_last_image)
 
-        continuous_polling_button = QPushButton("Poll for images continuously", self)
-        continuous_polling_button.setMaximumSize(150, 50)
-        continuous_polling_button.setCheckable(True)
-        continuous_polling_button.setStyleSheet("background-color : black")
-        continuous_polling_button.clicked.connect(self._start_continuous_polling)
+        self._continuous_polling_button = QPushButton("Poll for images continuously", self)
+        self._continuous_polling_button.setMaximumSize(150, 50)
+        self._continuous_polling_button.setCheckable(True)
+        self._continuous_polling_button.setStyleSheet("background-color : black")
+        self._continuous_polling_button.clicked.connect(self._start_continuous_polling)
 
         self._continuous_poll_cb = QComboBox()
         self._continuous_poll_cb.setMaximumSize(100, 50)
@@ -110,7 +112,7 @@ class ImageAcquisition(QWidget):
 
         # self._layout.addWidget(self._get_last_image_button)
         top_layout.addWidget(self._status_label)
-        top_layout.addWidget(continuous_polling_button)
+        top_layout.addWidget(self._continuous_polling_button)
         top_layout.addWidget(self._continuous_poll_cb)
 
         bottom_layout.addWidget(self._save_button)
@@ -159,6 +161,7 @@ class ImageAcquisition(QWidget):
             logger.debug(f"Time elapsed on receiving response: {time_elapsed}")
             start_time = time()
             q_img = qimage_from_jpg(response)
+
         else:
             logger.debug("Image will be send raw")
             is_ok1, (w, h) = self._requester.get_resolution()
@@ -179,24 +182,33 @@ class ImageAcquisition(QWidget):
         if q_img is not None:
             logger.debug("Setting new image...")
             self._image_label.set_image(q_img)
+            if send_as_jpg:
+                self._hist_plotter.plot_histogram(response.content)
 
         time_elapsed = time() - start_time
         logger.debug(f"Time elapsed on processing: {time_elapsed}")
 
+    def _set_button_for_capture(self, button):
+        button.setChecked(True)
+        button.setStyleSheet("background-color : #228822")
+        interval_str = self._continuous_poll_cb.currentText()
+        self._continuous_poll_cb.setDisabled(True)
+        logger.debug(f"Starting to poll for new images with interval {interval_str}")
+        interval = float(interval_str[:-1])
+        self._polling_event.clear()
+        start_interval_polling(self._polling_event, self._get_last_image, interval, self._kill_event)
+        self._continuous_polling = True
+        self._save_button.setEnabled(True)
+
     def _start_continuous_polling(self):
         button: QPushButton = self.sender()
         if button.isChecked():
-            button.setStyleSheet("background-color : #228822")
-            interval_str = self._continuous_poll_cb.currentText()
-            self._continuous_poll_cb.setDisabled(True)
-            logger.debug(f"Starting to poll for new images with interval {interval_str}")
-            interval = float(interval_str[:-1])
             response = self._requester.start_capturing()
             logger.debug(f"Start capturing returned: {response.status_code} with content: {response.json()}")
-            self._polling_event.clear()
-            start_interval_polling(self._polling_event, self._get_last_image, interval, self._kill_event)
-            self._continuous_polling = True
-            self._save_button.setEnabled(True)
+            if response.status_code == 200:
+                self._set_button_for_capture(button)
+            else:
+                logger.error("Starting capturing failed!")
 
         else:
             self._stop_saving_impl()
@@ -222,6 +234,8 @@ class ImageAcquisition(QWidget):
         if is_ok:
             logger.debug(f"Acquired status: {status}")
             state = status.get("state", "<UNKNOWN>")
+            if state == "CAPTURE" or state == "SAVE":
+                self._set_button_for_capture(self._continuous_polling_button)
             if state == "SAVE":
                 number = int(status.get("number", "0"))
                 self._capture_progress_bar.setValue(number+1)

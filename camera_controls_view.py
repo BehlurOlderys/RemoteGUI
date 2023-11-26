@@ -8,8 +8,20 @@ from image_acquisition_widget import ImageAcquisition
 from resizeable_label_with_image import ResizeableLabelWithImage
 from camera_requester import CameraRequester
 from utils import start_interval_polling
+from general_settings_widget import GeneralSettings
 
-from PyQt5.QtWidgets import QHBoxLayout, QWidget, QVBoxLayout, QPushButton
+## image processing
+from io import BytesIO
+from PIL import Image
+import numpy as np
+import matplotlib.pyplot as plt
+
+from PyQt5.QtWidgets import QHBoxLayout, QWidget, QVBoxLayout, QPushButton, QTabWidget
+import matplotlib
+matplotlib.use('Qt5Agg')
+from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg
+from matplotlib.figure import Figure
+
 
 import logging
 from threading import Event
@@ -23,6 +35,38 @@ def get_widget_refresh_rate_or_none(w):
     if hasattr(w, "refresh_rate_s") and callable(getattr(w, "refresh_rate_s")):
         return w.refresh_rate_s()
     return None
+
+
+class MplCanvas(FigureCanvasQTAgg):
+    def __init__(self, parent=None, width=2, height=1, dpi=50):
+        fig = Figure(figsize=(width, height), dpi=dpi)
+        fig.patch.set_facecolor('#212121')
+        self.axes = fig.add_subplot(111)
+        self.axes.set_facecolor('#212121')
+        super(MplCanvas, self).__init__(fig)
+
+
+class CanvasWidget(QWidget):
+    def __init__(self, *args, **kwargs):
+        super(CanvasWidget, self).__init__(*args, **kwargs)
+        layout = QVBoxLayout()
+        self._sc = MplCanvas(self, width=5, height=4, dpi=100)
+        self._sc.axes.plot([0, 1, 2, 3, 4], [10, 1, 20, 3, 40])
+        layout.addWidget(self._sc)
+        self.setLayout(layout)
+
+    def plot_histogram(self, data):
+        im = Image.open(BytesIO(data))
+        np_array = np.array(im)
+        logger.debug(f"Shape = {np_array.shape}, max = {np.max(np_array)}")
+        values, bins = np.histogram(np_array, bins=100)
+        bins = bins[1:]
+        logger.debug(f"Values = {values.shape}, Bins = {bins.shape}")
+
+        self._sc.axes.cla()
+        self._sc.axes.plot(bins, values)
+        self._sc.draw()
+        logger.debug(f"Histogram updated!")
 
 
 class CameraControlsView(QWidget):
@@ -40,7 +84,8 @@ class CameraControlsView(QWidget):
         self._prepare_ui()
 
     def __del__(self):
-        self._requester.stop_capturing()
+        if self._general_settings.should_turn_off_capture_on_exit():
+            self._requester.stop_capturing()
         logger.debug("__del__ camera controls view")
 
     def close(self):
@@ -63,6 +108,22 @@ class CameraControlsView(QWidget):
 
     def _prepare_ui(self):
         self._main_layout = QVBoxLayout()
+        self._tabs = QTabWidget()
+        self._camera_controls_tab = QWidget()
+        self._image_controls_tab = QWidget()
+
+        camera_controls_layout = QVBoxLayout()
+        image_controls_layout = QHBoxLayout()
+
+        self._camera_controls_tab.setLayout(camera_controls_layout)
+        self._image_controls_tab.setLayout(image_controls_layout)
+
+        self._tabs.addTab(self._camera_controls_tab, "Camera controls")
+        self._tabs.addTab(self._image_controls_tab, "Image controls")
+
+        general_stuff = QHBoxLayout()
+        self._general_settings: GeneralSettings = self._add_custom_widget(
+            general_stuff, GeneralSettings, self._requester)
 
         exp_gain_off = QHBoxLayout()
         self._add_custom_widget(exp_gain_off, ExposureDial, self._requester)
@@ -84,18 +145,29 @@ class CameraControlsView(QWidget):
 
         self._image_label = ResizeableLabelWithImage(self)
 
+        image_histogram = CanvasWidget()
+        image_histogram.setMinimumSize(200, 200)
+        image_histogram.setMaximumSize(500, 500)
+
         acquisition_layout = QHBoxLayout()
         self._add_custom_widget(acquisition_layout,
                                 ImageAcquisition,
-                                self._requester, self._format_chooser, self._image_label, self._kill_event)
+                                self._requester, self._format_chooser, self._image_label, image_histogram, self._kill_event)
 
-        self._main_layout.addLayout(exp_gain_off)
-        self._main_layout.addLayout(format_bin)
-        self._main_layout.addLayout(temp_control)
-        self._main_layout.addLayout(refresh_layout)
-        self._main_layout.addLayout(acquisition_layout)
-        self._main_layout.addWidget(self._image_label)
+        camera_controls_layout.addLayout(general_stuff)
+        camera_controls_layout.addLayout(exp_gain_off)
+        camera_controls_layout.addLayout(format_bin)
+        camera_controls_layout.addLayout(temp_control)
+        camera_controls_layout.addLayout(refresh_layout)
+        camera_controls_layout.addLayout(acquisition_layout)
 
+        image_controls_layout.addWidget(image_histogram)
+
+        image_layout = QHBoxLayout()
+        image_layout.addWidget(self._image_label)
+
+        self._main_layout.addWidget(self._tabs)
+        self._main_layout.addLayout(image_layout)
         self.setLayout(self._main_layout)
 
     def _refresh_all(self):
