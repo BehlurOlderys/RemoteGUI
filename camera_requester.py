@@ -28,7 +28,7 @@ def handle_request_call(request_call, full_url, error_prompt):
     logger.debug(f"Acquired response from {full_url}")
     if response.status_code != 200:
         if response.status_code == 422:
-            print(response.content)
+            logger.warning(response.content)
         logger.error(f"HTTP error encountered while getting from {full_url}: "
                      f"status code={response.status_code}")
         error_prompt(f"HTTP error encountered while getting from {full_url}:\n"

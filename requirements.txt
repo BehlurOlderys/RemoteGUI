@@ -1,0 +1,5 @@
+PyQt5~=5.15.9
+requests~=2.31.0
+numpy~=1.26.0
+matplotlib~=3.8.2
+Pillow~=10.0.1

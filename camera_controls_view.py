@@ -7,20 +7,12 @@ from temperature_control_widget import TemperatureControl
 from image_acquisition_widget import ImageAcquisition
 from resizeable_label_with_image import ResizeableLabelWithImage
 from camera_requester import CameraRequester
+from canvas_widget import CanvasWidget
 from utils import start_interval_polling
 from general_settings_widget import GeneralSettings
 
-## image processing
-from io import BytesIO
-from PIL import Image
-import numpy as np
-import matplotlib.pyplot as plt
 
 from PyQt5.QtWidgets import QHBoxLayout, QWidget, QVBoxLayout, QPushButton, QTabWidget
-import matplotlib
-matplotlib.use('Qt5Agg')
-from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg
-from matplotlib.figure import Figure
 
 
 import logging
@@ -35,38 +27,6 @@ def get_widget_refresh_rate_or_none(w):
     if hasattr(w, "refresh_rate_s") and callable(getattr(w, "refresh_rate_s")):
         return w.refresh_rate_s()
     return None
-
-
-class MplCanvas(FigureCanvasQTAgg):
-    def __init__(self, parent=None, width=2, height=1, dpi=50):
-        fig = Figure(figsize=(width, height), dpi=dpi)
-        fig.patch.set_facecolor('#212121')
-        self.axes = fig.add_subplot(111)
-        self.axes.set_facecolor('#212121')
-        super(MplCanvas, self).__init__(fig)
-
-
-class CanvasWidget(QWidget):
-    def __init__(self, *args, **kwargs):
-        super(CanvasWidget, self).__init__(*args, **kwargs)
-        layout = QVBoxLayout()
-        self._sc = MplCanvas(self, width=5, height=4, dpi=100)
-        self._sc.axes.plot([0, 1, 2, 3, 4], [10, 1, 20, 3, 40])
-        layout.addWidget(self._sc)
-        self.setLayout(layout)
-
-    def plot_histogram(self, data):
-        im = Image.open(BytesIO(data))
-        np_array = np.array(im)
-        logger.debug(f"Shape = {np_array.shape}, max = {np.max(np_array)}")
-        values, bins = np.histogram(np_array, bins=100)
-        bins = bins[1:]
-        logger.debug(f"Values = {values.shape}, Bins = {bins.shape}")
-
-        self._sc.axes.cla()
-        self._sc.axes.plot(bins, values)
-        self._sc.draw()
-        logger.debug(f"Histogram updated!")
 
 
 class CameraControlsView(QWidget):
@@ -152,7 +112,8 @@ class CameraControlsView(QWidget):
         acquisition_layout = QHBoxLayout()
         self._add_custom_widget(acquisition_layout,
                                 ImageAcquisition,
-                                self._requester, self._format_chooser, self._image_label, image_histogram, self._kill_event)
+                                self._requester, self._format_chooser, self._image_label, image_histogram,
+                                self._kill_event)
 
         camera_controls_layout.addLayout(general_stuff)
         camera_controls_layout.addLayout(exp_gain_off)
